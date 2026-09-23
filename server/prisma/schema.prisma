@@ -1,0 +1,306 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+
+
+model User {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  passwordHash String
+  role         String    // ADMIN, TEACHER, STUDENT
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  teacher      Teacher?
+  student      Student?
+
+  @@map("users")
+}
+
+model Department {
+  id        String     @id @default(uuid())
+  code      String     @unique // e.g. CS, IT, ENTC
+  name      String     // Computer Science & Engineering
+  createdAt DateTime   @default(now())
+
+  divisions Division[]
+  subjects  Subject[]
+  teachers  Teacher[]
+  students  Student[]
+
+  @@map("departments")
+}
+
+model Teacher {
+  id           String     @id @default(uuid())
+  userId       String     @unique
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  teacherCode  String     @unique // Employee ID / Staff ID
+  fullName     String
+  departmentId String
+  department   Department @relation(fields: [departmentId], references: [id])
+  phone        String?
+  createdAt    DateTime   @default(now())
+
+  assignments  TeacherAssignment[]
+  sessions     AttendanceSession[]
+
+  @@map("teachers")
+}
+
+model Student {
+  prn                String     @id // Permanent Registration Number (e.g. PRN20241001)
+  userId             String     @unique
+  user               User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rollNumber         String     // Class Roll Number (e.g. 401)
+  fullName           String
+  institutionalEmail String     @unique
+  departmentId       String
+  department         Department @relation(fields: [departmentId], references: [id])
+  academicYear       String     // e.g. "2024-2028"
+  phone              String?
+  isActive           Boolean    @default(true)
+  createdAt          DateTime   @default(now())
+
+  enrollments        StudentEnrollment[]
+  attendanceRecords  AttendanceRecord[]
+  webAuthnCredentials WebAuthnCredential[]
+
+  @@index([rollNumber])
+  @@map("students")
+}
+
+model Division {
+  id           String              @id @default(uuid())
+  departmentId String
+  department   Department          @relation(fields: [departmentId], references: [id])
+  name         String              // e.g. "Division A", "Division B"
+  academicYear String              // e.g. "2024-2025"
+  semester     Int                 // e.g. 5
+  createdAt    DateTime            @default(now())
+
+  batches      Batch[]
+  enrollments  StudentEnrollment[]
+  assignments  TeacherAssignment[]
+  sessions     AttendanceSession[]
+
+  @@unique([departmentId, name, academicYear, semester])
+  @@map("divisions")
+}
+
+model Batch {
+  id           String              @id @default(uuid())
+  divisionId   String
+  division     Division            @relation(fields: [divisionId], references: [id], onDelete: Cascade)
+  name         String              // e.g. "B1", "B2", "B3"
+  createdAt    DateTime            @default(now())
+
+  enrollments  StudentEnrollment[]
+  assignments  TeacherAssignment[]
+  sessions     AttendanceSession[]
+
+  @@unique([divisionId, name])
+  @@map("batches")
+}
+
+model StudentEnrollment {
+  id           String    @id @default(uuid())
+  studentPrn   String
+  student      Student   @relation(fields: [studentPrn], references: [prn], onDelete: Cascade)
+  divisionId   String
+  division     Division  @relation(fields: [divisionId], references: [id], onDelete: Cascade)
+  batchId      String?
+  batch        Batch?    @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  academicYear String
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+
+  @@unique([studentPrn, divisionId, academicYear])
+  @@index([divisionId])
+  @@index([batchId])
+  @@map("student_enrollments")
+}
+
+model Subject {
+  id           String              @id @default(uuid())
+  code         String              @unique // e.g. CS601, CN301
+  name         String              // e.g. Distributed Systems & Cloud Computing
+  departmentId String
+  department   Department          @relation(fields: [departmentId], references: [id])
+  semester     Int
+  credits      Int                 @default(3)
+  isActive     Boolean             @default(true)
+  createdAt    DateTime            @default(now())
+
+  assignments  TeacherAssignment[]
+  sessions     AttendanceSession[]
+
+  @@map("subjects")
+}
+
+model TeacherAssignment {
+  id          String   @id @default(uuid())
+  teacherId   String
+  teacher     Teacher  @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+  subjectId   String
+  subject     Subject  @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  divisionId  String
+  division    Division @relation(fields: [divisionId], references: [id], onDelete: Cascade)
+  batchId     String?
+  batch       Batch?   @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now())
+
+  @@unique([teacherId, subjectId, divisionId, batchId])
+  @@map("teacher_assignments")
+}
+
+model Classroom {
+  id                  String              @id @default(uuid())
+  roomCode            String              @unique // e.g. "LH-301", "LAB-402"
+  buildingName        String              // "Main Academic Block"
+  floorNumber         Int                 // 3
+  latitude            Float               // e.g. 18.5204303
+  longitude           Float               // e.g. 73.8567437
+  allowedRadiusMeters Float               @default(25.0)
+  hardwareBeaconId    String?             // Future ESP32 BLE Beacon UUID
+  hardwareSecretHash  String?             // Future ESP32 HMAC Secret
+  isActive            Boolean             @default(true)
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  device              ClassroomDevice?
+  sessions            AttendanceSession[]
+
+  @@map("classrooms")
+}
+
+model ClassroomDevice {
+  id            String    @id @default(uuid())
+  deviceId      String    @unique // e.g. "ESP32-LH401"
+  classroomId   String    @unique // 1-to-1 association with classroom
+  classroom     Classroom @relation(fields: [classroomId], references: [id], onDelete: Cascade)
+  bleIdentifier String    // e.g. "GEO-LH401"
+  status        String    @default("ACTIVE") // ACTIVE, INACTIVE
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@map("classroom_devices")
+}
+
+model AttendanceSession {
+  id                 String             @id @default(uuid())
+  sessionCode        String             @unique // 6-character human readable code e.g. "SESS-7X"
+  teacherId          String
+  teacher            Teacher            @relation(fields: [teacherId], references: [id])
+  subjectId          String
+  subject            Subject            @relation(fields: [subjectId], references: [id])
+  divisionId         String
+  division           Division           @relation(fields: [divisionId], references: [id])
+  batchId            String?
+  batch              Batch?             @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  classroomId        String
+  classroom          Classroom          @relation(fields: [classroomId], references: [id])
+  otpHash            String?            // Optional internal / fallback OTP hash
+  otpExpiresAt       DateTime
+  status             String             @default("ACTIVE") // ACTIVE, CLOSED, EXPIRED
+  startedAt          DateTime           @default(now())
+  closedAt           DateTime?
+  durationSeconds    Int                @default(180)
+  verificationLayers String             @default("GPS_DEVICE_BIOMETRIC")
+  createdAt          DateTime           @default(now())
+
+  attendanceRecords  AttendanceRecord[]
+  erpBatches         ErpStagingBatch[]
+  auditLogs          AuditLog[]
+
+  @@index([status])
+  @@index([divisionId])
+  @@index([teacherId])
+  @@map("attendance_sessions")
+}
+
+model AttendanceRecord {
+  id                     String            @id @default(uuid())
+  sessionId              String
+  session                AttendanceSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  studentPrn             String
+  student                Student           @relation(fields: [studentPrn], references: [prn], onDelete: Cascade)
+  status                 String            // PRESENT, REJECTED, MANUAL_OVERRIDE
+  failureReason          String?           // OUTSIDE_GEOFENCE, DEVICE_INACTIVE, BIOMETRIC_FAILED, SESSION_EXPIRED
+  submittedLatitude      Float?
+  submittedLongitude     Float?
+  computedDistanceMeters Float?
+  gpsAccuracyMeters      Float?
+  deviceId               String?           // e.g. "ESP32-LH401"
+  deviceVerified         Boolean           @default(true)
+  biometricVerified      Boolean           @default(true)
+  verificationMode       String            @default("GPS_DEVICE_BIOMETRIC")
+  clientIp               String?
+  userAgent              String?
+  markedAt               DateTime          @default(now())
+  isErpSynced            Boolean           @default(false)
+  erpSyncedAt            DateTime?
+
+  @@unique([sessionId, studentPrn]) // Strict duplicate punch prevention per session
+  @@index([studentPrn])
+  @@index([sessionId, status])
+  @@map("attendance_records")
+}
+
+model AuditLog {
+  id         String             @id @default(uuid())
+  sessionId  String?
+  session    AttendanceSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  entityName String             // "AttendanceRecord", "AttendanceSession", "Classroom"
+  entityId   String
+  action     String             // "MANUAL_OVERRIDE", "SESSION_START", "SESSION_CLOSE", "GEOFENCE_REJECTION"
+  actorId    String             // User ID of person performing action
+  actorRole  String             // TEACHER, ADMIN, SYSTEM
+  details    String             // JSON string of old/new state or payload
+  ipAddress  String?
+  createdAt  DateTime           @default(now())
+
+  @@index([entityName, entityId])
+  @@index([actorId])
+  @@map("audit_logs")
+}
+
+model ErpStagingBatch {
+  id              String            @id @default(uuid())
+  sessionId       String
+  session         AttendanceSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  batchCode       String            @unique
+  status          String            @default("PENDING") // PENDING, SYNCED, FAILED
+  totalRecords    Int
+  presentCount    Int
+  absentCount     Int
+  responsePayload String?           // JSON response from ERP endpoint
+  createdAt       DateTime          @default(now())
+  syncedAt        DateTime?
+
+  @@map("erp_staging_batches")
+}
+
+model WebAuthnCredential {
+  id              String    @id @default(uuid())
+  studentPrn      String
+  student         Student   @relation(fields: [studentPrn], references: [prn], onDelete: Cascade)
+  credentialId    String    @unique // Base64URL-encoded credential ID
+  publicKey       String    // Base64URL-encoded public key (cryptographic key ONLY, NEVER raw biometrics)
+  counter         Int       @default(0) // WebAuthn sign counter for clone/replay detection
+  transports      String?   // JSON array of supported transports
+  deviceType      String?   // e.g. "Platform Authenticator (Face/Touch ID/Passcode)"
+  aaguid          String?   // Authenticator AAGUID
+  createdAt       DateTime  @default(now())
+  lastUsedAt      DateTime?
+
+  @@index([studentPrn])
+  @@map("webauthn_credentials")
+}
