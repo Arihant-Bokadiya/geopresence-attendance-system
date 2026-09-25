@@ -28,6 +28,8 @@ export const AdminClassroomsPage: React.FC = () => {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [gpsAcquiring, setGpsAcquiring] = useState(false);
+  const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
+  const [gpsTimestamp, setGpsTimestamp] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
 
   useEffect(() => {
@@ -56,6 +58,8 @@ export const AdminClassroomsPage: React.FC = () => {
     setAllowedRadiusMeters(25);
     setHardwareBeaconId('');
     setIsActive(true);
+    setGpsAccuracy(null);
+    setGpsTimestamp(null);
     setError(null);
     setModalOpen(true);
   };
@@ -70,31 +74,47 @@ export const AdminClassroomsPage: React.FC = () => {
     setAllowedRadiusMeters(c.allowedRadiusMeters);
     setHardwareBeaconId(c.hardwareBeaconId || '');
     setIsActive(c.isActive);
+    setGpsAccuracy(null);
+    setGpsTimestamp(null);
     setError(null);
     setModalOpen(true);
   };
 
   const handleCaptureCurrentGps = () => {
     if (!('geolocation' in navigator)) {
-      setError('Geolocation not supported by this browser.');
+      setError('Geolocation is not supported by your browser.');
       return;
     }
+
+    setError(null);
     setGpsAcquiring(true);
+
+    // Request fresh location every time by setting maximumAge: 0
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        setLatitude(pos.coords.latitude.toFixed(7));
-        setLongitude(pos.coords.longitude.toFixed(7));
+        const freshLat = pos.coords.latitude;
+        const freshLon = pos.coords.longitude;
+        const freshAcc = pos.coords.accuracy;
+
+        setLatitude(freshLat.toFixed(7));
+        setLongitude(freshLon.toFixed(7));
+        setGpsAccuracy(freshAcc);
+        setGpsTimestamp(new Date().toLocaleTimeString());
         setGpsAcquiring(false);
       },
       (err) => {
-        if (err.code === 1) { // PERMISSION_DENIED
-          setError('Location permission denied. Please enter coordinates manually.');
-        } else {
-          setError(`Failed to acquire GPS: ${err.message}. Please enter coordinates manually.`);
-        }
         setGpsAcquiring(false);
+        if (err.code === 1) { // PERMISSION_DENIED
+          setError('Location permission denied. Please allow location access in your browser settings.');
+        } else if (err.code === 2) { // POSITION_UNAVAILABLE
+          setError('GPS location unavailable. Please ensure location services are enabled on your device.');
+        } else if (err.code === 3) { // TIMEOUT
+          setError('Location request timed out. Please click "Use Current Location" again to retry.');
+        } else {
+          setError(`Failed to acquire GPS: ${err.message}.`);
+        }
       },
-      { enableHighAccuracy: true, timeout: 10000 }
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
     );
   };
 
@@ -343,19 +363,27 @@ export const AdminClassroomsPage: React.FC = () => {
             padding: '0.85rem',
             marginBottom: '1rem'
           }}>
-            <div className="flex items-center justify-between" style={{ marginBottom: '0.5rem' }}>
-              <div style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                Authoritative Geofence Center (WGS84 Coordinates)
+            <div className="flex items-center justify-between" style={{ marginBottom: '0.5rem', flexWrap: 'wrap', gap: '0.4rem' }}>
+              <div>
+                <div style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+                  Authoritative Geofence Center (WGS84 Coordinates)
+                </div>
+                {gpsAccuracy !== null && gpsTimestamp && (
+                  <div style={{ fontSize: '0.7rem', color: 'var(--color-success)', marginTop: '2px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    <CheckCircle2 size={12} color="var(--color-success)" />
+                    <span>Fresh GPS: ±{Math.round(gpsAccuracy)}m accuracy (Acquired at {gpsTimestamp})</span>
+                  </div>
+                )}
               </div>
               <button
                 type="button"
                 className="btn btn-secondary btn-sm"
-                style={{ fontSize: '0.72rem', padding: '0.25rem 0.5rem' }}
+                style={{ fontSize: '0.72rem', padding: '0.28rem 0.55rem', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
                 onClick={handleCaptureCurrentGps}
                 disabled={gpsAcquiring}
               >
                 <Navigation size={12} />
-                <span>{gpsAcquiring ? 'Acquiring GPS...' : 'Use My Device Location'}</span>
+                <span>{gpsAcquiring ? 'Acquiring GPS...' : 'Use Current Location'}</span>
               </button>
             </div>
 

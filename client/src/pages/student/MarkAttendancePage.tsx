@@ -8,7 +8,7 @@ import { Alert } from '../../components/ui/Alert.js';
 import { EmptyState } from '../../components/ui/EmptyState.js';
 import {
   MapPin, CheckCircle2, XCircle, RefreshCw,
-  ArrowLeft, Radio, Fingerprint, Smartphone
+  ArrowLeft, Radio, Fingerprint, Smartphone, ShieldCheck, AlertCircle
 } from 'lucide-react';
 
 interface MarkAttendancePageProps {
@@ -18,12 +18,16 @@ interface MarkAttendancePageProps {
   onNavigateHistory: () => void;
 }
 
-type LocationState = 
-  | 'IDLE'
-  | 'CHECKING'
-  | 'VERIFIED'
-  | 'OUTSIDE'
-  | 'ERROR';
+type AttendanceFlowStatus =
+  | 'IDLE'                   // Waiting for user to click [ MARK ATTENDANCE ]
+  | 'ACQUIRING_GPS'          // Getting browser GPS coordinates
+  | 'CHECKING_GEOFENCE'      // Backend is computing distance and verifying geofence
+  | 'LOCATION_VERIFIED'      // Read-only result: Location verified
+  | 'AUTHENTICATING_PHONE'   // Prompting WebAuthn platform authentication
+  | 'OUTSIDE_GEOFENCE'       // Read-only result: outside classroom area
+  | 'LOCATION_ERROR'         // Read-only result: GPS permission or accuracy error
+  | 'AUTH_ERROR'             // Read-only result: WebAuthn cancelled or failed
+  | 'NEEDS_PHONE_SETUP';     // Device not yet registered
 
 export const MarkAttendancePage: React.FC<MarkAttendancePageProps> = ({
   user,
@@ -36,18 +40,15 @@ export const MarkAttendancePage: React.FC<MarkAttendancePageProps> = ({
   const [sessionLoading, setSessionLoading] = useState(true);
   const [alreadyMarkedRecord, setAlreadyMarkedRecord] = useState<any | null>(null);
 
-  // Layer 2: Presence (GPS + ESP32 Device) State
+  // Attendance Pipeline State
+  const [flowStatus, setFlowStatus] = useState<AttendanceFlowStatus>('IDLE');
   const [coords, setCoords] = useState<{ latitude: number; longitude: number; accuracy: number } | null>(null);
-  const [presenceState, setPresenceState] = useState<LocationState>('IDLE');
   const [presenceDetails, setPresenceDetails] = useState<any | null>(null);
-  const [presenceErrorMessage, setPresenceErrorMessage] = useState<string>('');
+  const [errorMessage, setErrorMessage] = useState<string>('');
 
-  // Layer 3: Phone Biometric Authentication State
+  // Phone Biometric Authentication State
   const [isPhoneRegistered, setIsPhoneRegistered] = useState(false);
-  const [checkingPhoneAuth, setCheckingPhoneAuth] = useState(true);
   const [registeringPhone, setRegisteringPhone] = useState(false);
-  const [biometricAuthenticating, setBiometricAuthenticating] = useState(false);
-  const [biometricError, setBiometricError] = useState<string | null>(null);
 
   // Final Confirmation State
   const [attendanceSuccess, setAttendanceSuccess] = useState<any | null>(null);
@@ -59,13 +60,10 @@ export const MarkAttendancePage: React.FC<MarkAttendancePageProps> = ({
 
   const checkPhoneAuthStatus = async () => {
     try {
-      setCheckingPhoneAuth(true);
       const res = await apiRequest<{ isRegistered: boolean }>('/auth/webauthn/status');
       setIsPhoneRegistered(Boolean(res.isRegistered));
     } catch (err) {
       console.error('Failed to query phone auth status:', err);
-    } finally {
-      setCheckingPhoneAuth(false);
     }
   };
 
@@ -107,7 +105,7 @@ export const MarkAttendancePage: React.FC<MarkAttendancePageProps> = ({
   const handleRegisterPhone = async () => {
     try {
       setRegisteringPhone(true);
-      setBiometricError(null);
+      setErrorMessage('');
 
       const options = await apiRequest<any>('/auth/webauthn/register/options', { method: 'POST' });
       const regResponse = await startRegistration({ optionsJSON: options });
@@ -122,109 +120,30 @@ export const MarkAttendancePage: React.FC<MarkAttendancePageProps> = ({
 
       if (verifyRes.verified) {
         setIsPhoneRegistered(true);
+        // If coords already exist, continue to mark attendance immediately
+        if (coords) {
+          await executeBiometricAuthentication(coords);
+        } else {
+          setFlowStatus('IDLE');
+        }
       }
     } catch (err: any) {
       console.error('Registration error:', err);
       if (err.name === 'NotAllowedError') {
-        setBiometricError('Phone registration was cancelled on your device.');
+        setErrorMessage('Phone registration was cancelled on your device.');
       } else {
-        setBiometricError(err.message || 'Failed to register phone authenticator.');
+        setErrorMessage(err.message || 'Failed to register phone authenticator.');
       }
+      setFlowStatus('AUTH_ERROR');
     } finally {
       setRegisteringPhone(false);
     }
   };
 
-  // LAYER 2: VERIFY CLASSROOM PRESENCE (Real Browser GPS + Registered Classroom Device)
-  const handleVerifyPresence = async () => {
-    setPresenceState('CHECKING');
-    setPresenceErrorMessage('');
-    setPresenceDetails(null);
-    setBiometricError(null);
-
-    // Physical Device Location API
-    if (!('geolocation' in navigator)) {
-      setPresenceState('ERROR');
-      setPresenceErrorMessage('Geolocation is not supported by your device browser.');
-      return;
-    }
-
-    navigator.geolocation.getCurrentPosition(
-      async (pos) => {
-        const accuracy = pos.coords.accuracy || 10.0;
-        if (accuracy > 50) {
-          setPresenceState('ERROR');
-          setPresenceErrorMessage(`Location accuracy is too low (${Math.round(accuracy)}m). Please enable precise location and try again.`);
-          return;
-        }
-
-        const devCoords = {
-          latitude: pos.coords.latitude,
-          longitude: pos.coords.longitude,
-          accuracy
-        };
-        setCoords(devCoords);
-        await sendPresenceCheck(devCoords.latitude, devCoords.longitude, devCoords.accuracy);
-      },
-      (err) => {
-        setPresenceState('ERROR');
-        if (err.code === 1) { // PERMISSION_DENIED
-          setPresenceErrorMessage('Location permission denied. Please enable location access in browser settings to verify attendance.');
-        } else {
-          setPresenceErrorMessage(`Location error: ${err.message}. Please enable precise GPS and try again.`);
-        }
-      },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
-    );
-  };
-
-  const sendPresenceCheck = async (latitude: number, longitude: number, accuracy: number) => {
-    try {
-      const res = await apiRequest<any>('/attendance/verify-presence', {
-        method: 'POST',
-        body: {
-          sessionId: activeSession.id,
-          latitude,
-          longitude,
-          accuracy
-        }
-      });
-
-      if (res.verified) {
-        setPresenceState('VERIFIED');
-        setPresenceDetails(res);
-      } else {
-        setPresenceState('OUTSIDE');
-        setPresenceDetails(res);
-      }
-    } catch (err: any) {
-      if (err.status === 422 || err.code === 'OUTSIDE_GEOFENCE' || err.status === 'OUTSIDE_GEOFENCE') {
-        setPresenceState('OUTSIDE');
-        setPresenceDetails({
-          verified: false,
-          distanceMeters: err.distanceMeters,
-          allowedRadiusMeters: err.allowedRadiusMeters,
-          message: err.message || 'Attendance rejected. You are outside the classroom attendance area.'
-        });
-      } else if (err.code === 'ACCURACY_TOO_LOW') {
-        setPresenceState('ERROR');
-        setPresenceErrorMessage(err.message || 'Location accuracy is too low. Please enable precise location and try again.');
-      } else {
-        setPresenceState('ERROR');
-        setPresenceErrorMessage(err.message || 'Presence check server communication error.');
-      }
-    }
-  };
-
-  // LAYER 3: REAL WEBAUTHN PHONE AUTHENTICATION CEREMONY
-  const handleAuthenticatePhone = async () => {
-    if (!coords || !activeSession) {
-      setBiometricError('Classroom presence must be verified first.');
-      return;
-    }
-
-    setBiometricAuthenticating(true);
-    setBiometricError(null);
+  // Execute WebAuthn Platform Authentication & Submit
+  const executeBiometricAuthentication = async (currentCoords: { latitude: number; longitude: number; accuracy: number }) => {
+    setFlowStatus('AUTHENTICATING_PHONE');
+    setErrorMessage('');
 
     try {
       // 1. Get Cryptographic Challenge from Backend
@@ -241,9 +160,9 @@ export const MarkAttendancePage: React.FC<MarkAttendancePageProps> = ({
         method: 'POST',
         body: {
           sessionId: activeSession.id,
-          latitude: coords.latitude,
-          longitude: coords.longitude,
-          accuracy: coords.accuracy,
+          latitude: currentCoords.latitude,
+          longitude: currentCoords.longitude,
+          accuracy: currentCoords.accuracy,
           webauthnResponse: authResponse
         }
       });
@@ -251,25 +170,126 @@ export const MarkAttendancePage: React.FC<MarkAttendancePageProps> = ({
       if (res.status === 'PRESENT' && res.data) {
         setAttendanceSuccess(res.data);
       } else {
-        setBiometricError(res.message || 'Attendance verification could not be recorded.');
+        setErrorMessage(res.message || 'Attendance verification could not be recorded.');
+        setFlowStatus('AUTH_ERROR');
       }
     } catch (err: any) {
       console.error('Phone authentication error:', err);
       if (err.name === 'NotAllowedError') {
-        setBiometricError('Authentication failed or was cancelled by user. Your attendance has not been marked.');
+        setErrorMessage('Authentication was cancelled on your device. Attendance has not been recorded.');
       } else if (err.status === 409 || err.code === 'ALREADY_MARKED') {
-        setBiometricError('Your attendance has already been recorded for this session.');
+        setErrorMessage('Your attendance has already been recorded for this session.');
       } else if (err.code === 'OUTSIDE_GEOFENCE' || err.status === 422) {
-        setBiometricError(`Geofence rejection: ${err.message}`);
-        setPresenceState('OUTSIDE');
+        setErrorMessage(`Geofence rejection: ${err.message}`);
+        setFlowStatus('OUTSIDE_GEOFENCE');
+        return;
       } else if (err.status === 410 || err.code === 'SESSION_EXPIRED') {
-        setBiometricError('This attendance session has ended or expired.');
+        setErrorMessage('This attendance session has ended or expired.');
       } else {
-        setBiometricError(err.message || 'Phone authentication failed. Your attendance has not been marked.');
+        setErrorMessage(err.message || 'Phone authentication failed. Your attendance has not been recorded.');
       }
-    } finally {
-      setBiometricAuthenticating(false);
+      setFlowStatus('AUTH_ERROR');
     }
+  };
+
+  /**
+   * PRIMARY ACTION: [ MARK ATTENDANCE ]
+   * Unified pipeline:
+   * 1. Get real GPS location from device
+   * 2. Backend calculates actual distance from classroom coordinates & verifies geofence
+   * 3. If valid ("Location verified"), immediately continues to WebAuthn platform authentication
+   * 4. If all checks pass, marks PRESENT
+   *
+   * Note: The student never selects or manipulates presence/location choices.
+   * All results are read-only and produced authoritatively by the backend.
+   */
+  const handleMarkAttendance = async () => {
+    setFlowStatus('ACQUIRING_GPS');
+    setErrorMessage('');
+    setPresenceDetails(null);
+
+    // 1. Device Location Check
+    if (!('geolocation' in navigator)) {
+      setFlowStatus('LOCATION_ERROR');
+      setErrorMessage('Geolocation is not supported by your device browser.');
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const accuracy = pos.coords.accuracy || 10.0;
+        if (accuracy > 50) {
+          setFlowStatus('LOCATION_ERROR');
+          setErrorMessage(`Location accuracy is too low (${Math.round(accuracy)}m). Please enable high-accuracy GPS and try again.`);
+          return;
+        }
+
+        const devCoords = {
+          latitude: pos.coords.latitude,
+          longitude: pos.coords.longitude,
+          accuracy
+        };
+        setCoords(devCoords);
+
+        // 2. Backend Calculates Actual Distance & Geofence
+        setFlowStatus('CHECKING_GEOFENCE');
+        try {
+          const res = await apiRequest<any>('/attendance/verify-presence', {
+            method: 'POST',
+            body: {
+              sessionId: activeSession.id,
+              latitude: devCoords.latitude,
+              longitude: devCoords.longitude,
+              accuracy: devCoords.accuracy
+            }
+          });
+
+          if (res.verified) {
+            setPresenceDetails(res);
+            setFlowStatus('LOCATION_VERIFIED');
+
+            // 3. Location verified! If phone not registered, ask to register; otherwise authenticate
+            if (!isPhoneRegistered) {
+              setFlowStatus('NEEDS_PHONE_SETUP');
+            } else {
+              await executeBiometricAuthentication(devCoords);
+            }
+          } else {
+            setPresenceDetails(res);
+            setFlowStatus('OUTSIDE_GEOFENCE');
+          }
+        } catch (err: any) {
+          if (err.status === 422 || err.code === 'OUTSIDE_GEOFENCE' || err.status === 'OUTSIDE_GEOFENCE') {
+            setPresenceDetails({
+              verified: false,
+              distanceMeters: err.distanceMeters,
+              allowedRadiusMeters: err.allowedRadiusMeters,
+              message: err.message || "You're outside the classroom attendance area."
+            });
+            setFlowStatus('OUTSIDE_GEOFENCE');
+          } else if (err.code === 'ACCURACY_TOO_LOW') {
+            setFlowStatus('LOCATION_ERROR');
+            setErrorMessage(err.message || 'Location accuracy is too low. Please enable high-accuracy GPS and try again.');
+          } else {
+            setFlowStatus('LOCATION_ERROR');
+            setErrorMessage(err.message || 'Server communication error during presence check.');
+          }
+        }
+      },
+      (err) => {
+        setFlowStatus('LOCATION_ERROR');
+        if (err.code === 1) { // PERMISSION_DENIED
+          setErrorMessage('Location permission denied. Please allow location access in your browser settings to mark attendance.');
+        } else if (err.code === 2) {
+          setErrorMessage('GPS position unavailable. Please ensure location services are enabled on your device.');
+        } else if (err.code === 3) {
+          setErrorMessage('GPS request timed out. Please try again with clear location reception.');
+        } else {
+          setErrorMessage(`Location error: ${err.message}. Please try again.`);
+        }
+      },
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 }
+    );
   };
 
   // Loading State
@@ -370,7 +390,7 @@ export const MarkAttendancePage: React.FC<MarkAttendancePageProps> = ({
           </h2>
 
           <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', margin: '0 0 1.5rem', lineHeight: 1.5 }}>
-            Congratulations, {user.fullName}! Your physical presence in <strong>{activeSession.classroom?.roomCode}</strong> was confirmed via GPS Geofence and Phone Authenticator.
+            Congratulations, {user.fullName}! Your physical presence in <strong>{activeSession.classroom?.roomCode}</strong> was confirmed via GPS Geofence and Platform Authenticator.
           </p>
 
           <div style={{
@@ -396,11 +416,11 @@ export const MarkAttendancePage: React.FC<MarkAttendancePageProps> = ({
             </div>
             <div className="flex justify-between">
               <span style={{ color: 'var(--text-muted)' }}>Recorded Distance:</span>
-              <strong>{presenceDetails?.distanceMeters?.toFixed(1) || '3.2'} meters</strong>
+              <strong>{presenceDetails?.distanceMeters?.toFixed(1) || '0.0'} meters</strong>
             </div>
             <div className="flex justify-between">
               <span style={{ color: 'var(--text-muted)' }}>Verification Mode:</span>
-              <span style={{ color: 'var(--color-success-dark)', fontWeight: 600 }}>GPS Geofence + Phone Authenticator</span>
+              <span style={{ color: 'var(--color-success-dark)', fontWeight: 600 }}>Real GPS Geofence + Hardware Authenticator</span>
             </div>
           </div>
 
@@ -416,6 +436,8 @@ export const MarkAttendancePage: React.FC<MarkAttendancePageProps> = ({
       </div>
     );
   }
+
+  const isBusy = flowStatus === 'ACQUIRING_GPS' || flowStatus === 'CHECKING_GEOFENCE' || flowStatus === 'AUTHENTICATING_PHONE';
 
   return (
     <div className="app-container" style={{ maxWidth: '580px', padding: '1rem' }}>
@@ -453,216 +475,187 @@ export const MarkAttendancePage: React.FC<MarkAttendancePageProps> = ({
           {activeSession.subject?.code} — {activeSession.subject?.name}
         </h1>
         <p style={{ margin: 0, fontSize: '0.825rem', color: 'var(--text-secondary)' }}>
-          Instructor: {activeSession.teacher?.fullName} • Classroom: <strong>{activeSession.classroom?.roomCode}</strong>
+          Instructor: {activeSession.teacher?.fullName} • Classroom: <strong>{activeSession.classroom?.roomCode}</strong> ({activeSession.classroom?.allowedRadiusMeters || 25}m geofence)
         </p>
       </div>
 
-      {/* 3-LAYER VERIFICATION FLOW */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-
-        {/* LAYER 1: STUDENT IDENTITY */}
-        <div className="card" style={{
-          padding: '1.25rem',
-          borderLeft: '4px solid var(--color-success)',
-          backgroundColor: '#ffffff'
-        }}>
-          <div className="flex items-center justify-between">
-            <div>
-              <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
-                LAYER 1 • STUDENT IDENTITY
-              </div>
-              <div style={{ fontSize: '1rem', fontWeight: 700, marginTop: '0.2rem' }}>
-                {user.fullName}
-              </div>
-              <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '0.1rem' }}>
-                PRN: <span className="mono font-semibold" style={{ color: 'var(--brand-primary)' }}>{user.prn}</span>
-                {user.rollNumber && <> • Roll: <span className="mono">{user.rollNumber}</span></>}
-              </div>
+      {/* Student Identity Card */}
+      <div className="card" style={{
+        padding: '1rem 1.25rem',
+        borderLeft: '4px solid var(--brand-primary)',
+        backgroundColor: '#ffffff',
+        marginBottom: '1.25rem'
+      }}>
+        <div className="flex items-center justify-between">
+          <div>
+            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+              Student Identity
             </div>
-            <Badge variant="present" icon={<CheckCircle2 size={13} />}>
-              VERIFIED
-            </Badge>
+            <div style={{ fontSize: '0.95rem', fontWeight: 700, marginTop: '0.15rem' }}>
+              {user.fullName}
+            </div>
+            <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginTop: '0.1rem' }}>
+              PRN: <span className="mono font-semibold" style={{ color: 'var(--brand-primary)' }}>{user.prn}</span>
+              {user.rollNumber && <> • Roll: <span className="mono">{user.rollNumber}</span></>}
+            </div>
           </div>
+          <Badge variant="present" icon={<CheckCircle2 size={12} />}>
+            CONFIRMED
+          </Badge>
         </div>
+      </div>
 
-        {/* LAYER 2: CLASSROOM PRESENCE (GPS + ESP32) */}
-        <div className="card" style={{
-          padding: '1.25rem',
-          borderLeft: presenceState === 'VERIFIED' ? '4px solid var(--color-success)' : '4px solid var(--brand-primary)',
-          backgroundColor: '#ffffff'
-        }}>
-          <div className="flex items-center justify-between" style={{ marginBottom: '0.75rem' }}>
-            <div>
-              <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
-                LAYER 2 • CLASSROOM PRESENCE
-              </div>
-              <div style={{ fontSize: '1rem', fontWeight: 700, marginTop: '0.2rem' }}>
-                Classroom Geofence ({activeSession.classroom?.allowedRadiusMeters || 25}m Radius)
-              </div>
-            </div>
-            {presenceState === 'VERIFIED' ? (
-              <Badge variant="present" icon={<CheckCircle2 size={13} />}>
-                DETECTED
-              </Badge>
-            ) : presenceState === 'OUTSIDE' ? (
-              <Badge variant="absent" icon={<XCircle size={13} />}>
-                OUTSIDE ZONE
-              </Badge>
-            ) : (
-              <Badge variant="neutral">
-                PENDING
-              </Badge>
-            )}
-          </div>
+      {/* MAIN ATTENDANCE ACTION CARD */}
+      <div className="card" style={{
+        padding: '1.5rem',
+        backgroundColor: '#ffffff',
+        boxShadow: 'var(--shadow-md)'
+      }}>
 
-          {/* Presence State Displays */}
-          {presenceState === 'IDLE' && (
-            <div style={{ textAlign: 'center', padding: '0.75rem 0' }}>
-              <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
-                Confirm physical presence inside <strong>{activeSession.classroom?.roomCode}</strong>.
-              </p>
-              <Button
-                variant="primary"
-                fullWidth
-                onClick={() => handleVerifyPresence()}
-              >
-                <MapPin size={16} /> Verify Classroom Presence
-              </Button>
-            </div>
-          )}
+        {/* Read-Only Status Banners Generated by Backend */}
 
-          {presenceState === 'CHECKING' && (
-            <div style={{ textAlign: 'center', padding: '1.25rem 0' }}>
-              <div className="pulse-dot" style={{ width: '16px', height: '16px', margin: '0 auto 0.75rem' }} />
-              <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>Verifying Physical Presence...</div>
-              <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '0.2rem' }}>
-                Checking real device GPS coordinates & classroom geofence.
-              </div>
-            </div>
-          )}
-
-          {presenceState === 'VERIFIED' && (
-            <div style={{
-              backgroundColor: 'var(--color-success-bg)',
-              borderRadius: 'var(--radius-sm)',
-              border: '1px solid var(--color-success-border)',
-              padding: '0.85rem 1rem'
-            }}>
-              <div className="flex items-center gap-2" style={{ color: 'var(--color-success-dark)', fontWeight: 600, fontSize: '0.875rem' }}>
-                <CheckCircle2 size={18} color="var(--color-success)" />
-                <span>Classroom Presence Confirmed</span>
-              </div>
-              <div style={{ fontSize: '0.78rem', color: 'var(--color-success-dark)', marginTop: '0.3rem', lineHeight: 1.5 }}>
-                <div>• Geofence Distance: <strong>{presenceDetails?.distanceMeters?.toFixed(1) || '0.0'}m</strong> (Allowed: {presenceDetails?.allowedRadiusMeters || 25}m)</div>
-                <div>• Location Accuracy: <strong>{coords ? `${Math.round(coords.accuracy)}m` : 'High precision'}</strong></div>
-              </div>
-            </div>
-          )}
-
-          {presenceState === 'OUTSIDE' && (
-            <div>
-              <div style={{
-                backgroundColor: 'var(--color-danger-bg)',
-                borderRadius: 'var(--radius-sm)',
-                border: '1px solid var(--color-danger-border)',
-                padding: '0.85rem 1rem',
-                marginBottom: '0.75rem'
-              }}>
-                <div className="flex items-center gap-2" style={{ color: 'var(--color-danger-dark)', fontWeight: 600, fontSize: '0.875rem' }}>
-                  <XCircle size={18} color="var(--color-danger)" />
-                  <span>Outside Classroom Geofence</span>
-                </div>
-                <div style={{ fontSize: '0.78rem', color: 'var(--color-danger-dark)', marginTop: '0.3rem' }}>
-                  Attendance rejected: You are <strong>{presenceDetails?.distanceMeters?.toFixed(1) || '—'}m</strong> away from {activeSession.classroom?.roomCode}. Allowed radius is {presenceDetails?.allowedRadiusMeters || 25}m.
-                </div>
-              </div>
-              <Button variant="secondary" fullWidth size="sm" onClick={() => handleVerifyPresence()}>
-                <RefreshCw size={14} /> Retry Location Check
-              </Button>
-            </div>
-          )}
-
-          {presenceState === 'ERROR' && (
-            <div>
-              <Alert variant="danger" message={presenceErrorMessage} />
-              <div style={{ marginTop: '0.5rem' }}>
-                <Button variant="secondary" fullWidth size="sm" onClick={() => handleVerifyPresence()}>
-                  <RefreshCw size={14} /> Retry Location Check
-                </Button>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* LAYER 3: PHONE BIOMETRIC / PASSKEY AUTHENTICATION */}
-        {presenceState === 'VERIFIED' && (
-          <div className="card" style={{
-            padding: '1.5rem',
-            borderLeft: '4px solid var(--brand-primary)',
-            backgroundColor: '#ffffff'
+        {/* 1. Location Verified Result (Read-Only) */}
+        {(flowStatus === 'LOCATION_VERIFIED' || flowStatus === 'AUTHENTICATING_PHONE') && (
+          <div style={{
+            backgroundColor: 'var(--color-success-bg)',
+            borderRadius: 'var(--radius-sm)',
+            border: '1px solid var(--color-success-border)',
+            padding: '0.85rem 1rem',
+            marginBottom: '1.25rem'
           }}>
-            <div className="flex items-center justify-between" style={{ marginBottom: '0.75rem' }}>
-              <div>
-                <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
-                  LAYER 3 • PHONE AUTHENTICATION
-                </div>
-                <div style={{ fontSize: '1.05rem', fontWeight: 700, marginTop: '0.2rem' }}>
-                  Verify Your Identity
-                </div>
-              </div>
-              {isPhoneRegistered ? (
-                <Badge variant="present" icon={<CheckCircle2 size={12} />}>
-                  AUTHENTICATOR READY
-                </Badge>
-              ) : (
-                <Badge variant="absent" icon={<XCircle size={12} />}>
-                  REGISTRATION NEEDED
-                </Badge>
-              )}
+            <div className="flex items-center gap-2" style={{ color: 'var(--color-success-dark)', fontWeight: 600, fontSize: '0.875rem' }}>
+              <CheckCircle2 size={18} color="var(--color-success)" />
+              <span>Location verified</span>
             </div>
-
-            {biometricError && (
-              <div style={{ marginBottom: '1rem' }}>
-                <Alert variant="danger" message={biometricError} />
-              </div>
-            )}
-
-            {!isPhoneRegistered && !checkingPhoneAuth ? (
-              <div>
-                <p style={{ fontSize: '0.825rem', color: 'var(--text-secondary)', marginBottom: '1rem', lineHeight: 1.5 }}>
-                  You have not registered this device's phone authenticator yet. Please register your device using your phone screen lock (Face ID, Fingerprint, or PIN) to mark attendance.
-                </p>
-                <Button
-                  variant="primary"
-                  fullWidth
-                  loading={registeringPhone}
-                  onClick={handleRegisterPhone}
-                >
-                  <Smartphone size={16} /> REGISTER PHONE NOW
-                </Button>
-              </div>
-            ) : (
-              <div>
-                <p style={{ fontSize: '0.825rem', color: 'var(--text-secondary)', marginBottom: '1.25rem', lineHeight: 1.5 }}>
-                  Use your registered phone authentication to confirm attendance. Zero biometric data is stored on college servers.
-                </p>
-
-                <Button
-                  variant="primary"
-                  size="lg"
-                  fullWidth
-                  loading={biometricAuthenticating}
-                  onClick={handleAuthenticatePhone}
-                  style={{ fontWeight: 600 }}
-                >
-                  <Fingerprint size={18} /> CONFIRM ATTENDANCE WITH PHONE
-                </Button>
-              </div>
-            )}
+            <div style={{ fontSize: '0.78rem', color: 'var(--color-success-dark)', marginTop: '0.3rem', lineHeight: 1.5 }}>
+              • Classroom presence confirmed inside {activeSession.classroom?.roomCode} geofence ({presenceDetails?.distanceMeters?.toFixed(1) || '0.0'}m from center).
+            </div>
           </div>
         )}
 
+        {/* 2. Outside Geofence Result (Read-Only) */}
+        {flowStatus === 'OUTSIDE_GEOFENCE' && (
+          <div style={{
+            backgroundColor: 'var(--color-danger-bg)',
+            borderRadius: 'var(--radius-sm)',
+            border: '1px solid var(--color-danger-border)',
+            padding: '0.85rem 1rem',
+            marginBottom: '1.25rem'
+          }}>
+            <div className="flex items-center gap-2" style={{ color: 'var(--color-danger-dark)', fontWeight: 600, fontSize: '0.875rem' }}>
+              <XCircle size={18} color="var(--color-danger)" />
+              <span>You're outside the classroom attendance area.</span>
+            </div>
+            <div style={{ fontSize: '0.78rem', color: 'var(--color-danger-dark)', marginTop: '0.3rem', lineHeight: 1.5 }}>
+              Attendance rejected: You are <strong>{presenceDetails?.distanceMeters?.toFixed(1) || '—'}m</strong> away from {activeSession.classroom?.roomCode}. The allowed radius is {presenceDetails?.allowedRadiusMeters || 25}m.
+            </div>
+          </div>
+        )}
+
+        {/* 3. Location / GPS Error (Read-Only) */}
+        {flowStatus === 'LOCATION_ERROR' && (
+          <div style={{ marginBottom: '1.25rem' }}>
+            <Alert variant="danger" message={errorMessage} />
+          </div>
+        )}
+
+        {/* 4. Authentication Error (Read-Only) */}
+        {flowStatus === 'AUTH_ERROR' && (
+          <div style={{ marginBottom: '1.25rem' }}>
+            <Alert variant="danger" message={errorMessage} />
+          </div>
+        )}
+
+        {/* In-Progress Telemetry Spinner */}
+        {isBusy && (
+          <div style={{ textAlign: 'center', padding: '1rem 0 1.25rem' }}>
+            <div className="pulse-dot" style={{ width: '18px', height: '18px', margin: '0 auto 0.75rem' }} />
+            <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--text-primary)' }}>
+              {flowStatus === 'ACQUIRING_GPS' && 'Acquiring real device GPS location...'}
+              {flowStatus === 'CHECKING_GEOFENCE' && 'Calculating distance & verifying classroom geofence...'}
+              {flowStatus === 'AUTHENTICATING_PHONE' && 'Authenticating with device platform authenticator...'}
+            </div>
+            <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+              {flowStatus === 'ACQUIRING_GPS' && 'Reading high-accuracy physical device coordinates.'}
+              {flowStatus === 'CHECKING_GEOFENCE' && 'Backend computing authoritative Haversine distance.'}
+              {flowStatus === 'AUTHENTICATING_PHONE' && 'Please confirm with Face ID, Touch ID, or screen lock.'}
+            </div>
+          </div>
+        )}
+
+        {/* Needs Phone Setup State */}
+        {flowStatus === 'NEEDS_PHONE_SETUP' ? (
+          <div>
+            <div style={{
+              backgroundColor: 'var(--bg-surface-subtle)',
+              border: '1px solid var(--border-subtle)',
+              borderRadius: 'var(--radius-sm)',
+              padding: '1rem',
+              marginBottom: '1.25rem'
+            }}>
+              <div className="flex items-center gap-2" style={{ fontWeight: 600, fontSize: '0.875rem', marginBottom: '0.4rem' }}>
+                <Smartphone size={16} color="var(--brand-primary)" />
+                <span>Device Registration Required</span>
+              </div>
+              <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: 0, lineHeight: 1.5 }}>
+                Your location was verified. To complete attendance, please register this device's platform authenticator (Face ID, Touch ID, or screen lock).
+              </p>
+            </div>
+
+            <Button
+              variant="primary"
+              size="lg"
+              fullWidth
+              loading={registeringPhone}
+              onClick={handleRegisterPhone}
+              style={{ fontWeight: 700 }}
+            >
+              <Fingerprint size={18} /> REGISTER DEVICE & CONFIRM ATTENDANCE
+            </Button>
+          </div>
+        ) : (
+          /* PRIMARY ACTION BUTTON: [ MARK ATTENDANCE ] */
+          <div>
+            <p style={{ fontSize: '0.825rem', color: 'var(--text-secondary)', marginBottom: '1.25rem', textAlign: 'center', lineHeight: 1.5 }}>
+              Clicking below will verify your physical GPS presence in <strong>{activeSession.classroom?.roomCode}</strong> and authenticate via your device's security enclave.
+            </p>
+
+            <Button
+              variant="primary"
+              size="lg"
+              fullWidth
+              loading={isBusy}
+              disabled={isBusy}
+              onClick={handleMarkAttendance}
+              style={{
+                fontSize: '0.95rem',
+                fontWeight: 700,
+                letterSpacing: '0.02em',
+                padding: '0.85rem'
+              }}
+            >
+              {isBusy ? (
+                <span>VERIFYING ATTENDANCE...</span>
+              ) : flowStatus === 'OUTSIDE_GEOFENCE' || flowStatus === 'LOCATION_ERROR' || flowStatus === 'AUTH_ERROR' ? (
+                <span className="flex items-center justify-center gap-2">
+                  <RefreshCw size={17} /> RETRY ATTENDANCE
+                </span>
+              ) : (
+                <span className="flex items-center justify-center gap-2">
+                  <ShieldCheck size={18} /> MARK ATTENDANCE
+                </span>
+              )}
+            </Button>
+          </div>
+        )}
+
+        {/* Security & Verification Subtext */}
+        <div style={{ marginTop: '1.25rem', textAlign: 'center', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+          Authoritative Geofence & Cryptographic Attendance • Zero fake credentials or simulated biometrics
+        </div>
+
       </div>
+
     </div>
   );
 };
