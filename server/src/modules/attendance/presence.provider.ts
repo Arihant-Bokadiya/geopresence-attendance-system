@@ -17,6 +17,18 @@ export interface ClassroomPresenceCheckRequest {
   };
 }
 
+export interface GpsVerificationDiagnostics {
+  classroomLatitude: number;
+  classroomLongitude: number;
+  classroomStoredAccuracy: number | null;
+  studentLatitude: number;
+  studentLongitude: number;
+  studentReportedAccuracy: number;
+  calculatedDistanceMeters: number;
+  configuredRadius: number;
+  finalGeofenceResult: 'VERIFIED' | 'OUTSIDE_GEOFENCE' | 'ACCURACY_TOO_LOW';
+}
+
 export interface ClassroomPresenceResult {
   verified: boolean;
   gpsVerified: boolean;
@@ -32,16 +44,14 @@ export interface ClassroomPresenceResult {
   } | null;
   status: 'VERIFIED' | 'OUTSIDE_GEOFENCE' | 'DEVICE_INACTIVE' | 'DEVICE_NOT_FOUND' | 'ACCURACY_TOO_LOW';
   message: string;
+  diagnostics: GpsVerificationDiagnostics;
 }
 
 /**
  * ClassroomPresenceProvider
  * Clean architectural abstraction combining:
- * 1. Physical GPS Geofence (Haversine distance <= classroom allowed radius)
+ * 1. Physical GPS Geofence (Haversine distance <= classroom allowed radius with uncertainty)
  * 2. Classroom Device (ESP32 / BLE) Presence Verification
- * 
- * Note: When physical ESP32 is not present, runs in Development Simulation Mode
- * clearly disclosing simulated status while maintaining real production architecture.
  */
 export class ClassroomPresenceProvider {
   /**
@@ -73,29 +83,58 @@ export class ClassroomPresenceProvider {
       longitude: studentCoords.longitude
     };
 
-    // Check GPS Accuracy threshold
-    if (studentCoords.accuracy !== undefined && studentCoords.accuracy > 50) {
-      return {
-        verified: false,
-        gpsVerified: false,
-        distanceMeters: -1,
-        allowedRadiusMeters: classroom.allowedRadiusMeters,
-        deviceVerified: false,
-        device: null,
-        status: 'ACCURACY_TOO_LOW',
-        message: 'Location accuracy is too low. Please enable precise location and try again.'
-      };
-    }
+    const studentAccuracy = studentCoords.accuracy !== undefined ? studentCoords.accuracy : 10.0;
 
     const geofence = evaluateGeofence(
       studentGeocoords,
       classroomCoords,
-      classroom.allowedRadiusMeters
+      classroom.allowedRadiusMeters,
+      studentAccuracy,
+      classroom.locationAccuracyMeters
     );
 
-    const gpsVerified = geofence.isInside;
+    const diagnostics: GpsVerificationDiagnostics = {
+      classroomLatitude: classroom.latitude,
+      classroomLongitude: classroom.longitude,
+      classroomStoredAccuracy: classroom.locationAccuracyMeters ?? null,
+      studentLatitude: studentCoords.latitude,
+      studentLongitude: studentCoords.longitude,
+      studentReportedAccuracy: studentAccuracy,
+      calculatedDistanceMeters: geofence.distanceMeters,
+      configuredRadius: classroom.allowedRadiusMeters,
+      finalGeofenceResult: geofence.isInside ? 'VERIFIED' : (geofence.status === 'ACCURACY_TOO_LOW' ? 'ACCURACY_TOO_LOW' : 'OUTSIDE_GEOFENCE')
+    };
 
-    if (!gpsVerified) {
+    // Development diagnostic logging with real database & device values
+    console.log(`================ [GPS VERIFICATION DIAGNOSTIC] ================`);
+    console.log(`Classroom Latitude:        ${diagnostics.classroomLatitude}`);
+    console.log(`Classroom Longitude:       ${diagnostics.classroomLongitude}`);
+    console.log(`Classroom Stored Accuracy: ${diagnostics.classroomStoredAccuracy ?? 'N/A'} m`);
+    console.log(`Student Latitude:          ${diagnostics.studentLatitude}`);
+    console.log(`Student Longitude:         ${diagnostics.studentLongitude}`);
+    console.log(`Student Reported Accuracy: ${diagnostics.studentReportedAccuracy} m`);
+    console.log(`Calculated Distance:       ${diagnostics.calculatedDistanceMeters} m`);
+    console.log(`Configured Radius:         ${diagnostics.configuredRadius} m`);
+    console.log(`Final Geofence Result:     ${diagnostics.finalGeofenceResult}`);
+    console.log(`Message:                   ${geofence.message}`);
+    console.log(`===============================================================`);
+
+    // Check if accuracy is unacceptable
+    if (!geofence.accuracyAcceptable) {
+      return {
+        verified: false,
+        gpsVerified: false,
+        distanceMeters: geofence.distanceMeters,
+        allowedRadiusMeters: classroom.allowedRadiusMeters,
+        deviceVerified: false,
+        device: null,
+        status: 'ACCURACY_TOO_LOW',
+        message: geofence.message,
+        diagnostics
+      };
+    }
+
+    if (!geofence.isInside) {
       return {
         verified: false,
         gpsVerified: false,
@@ -110,12 +149,12 @@ export class ClassroomPresenceProvider {
           isSimulated: false
         } : null,
         status: 'OUTSIDE_GEOFENCE',
-        message: 'Attendance rejected. You are outside the classroom attendance area.'
+        message: geofence.message,
+        diagnostics
       };
     }
 
     // 3. Physical GPS Geofence verified!
-    // Device presence (ESP32/BLE) is reserved for future hardware integration and does not block current attendance.
     const classroomDevice = classroom.device;
 
     return {
@@ -132,7 +171,8 @@ export class ClassroomPresenceProvider {
         isSimulated: false
       } : null,
       status: 'VERIFIED',
-      message: 'Classroom presence verified via GPS geofence.'
+      message: geofence.message,
+      diagnostics
     };
   }
 }

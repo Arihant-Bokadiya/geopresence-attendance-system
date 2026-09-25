@@ -14,23 +14,93 @@ export const webauthnRouter = Router();
 // RP (Relying Party) Configuration
 const RP_NAME = 'GeoPresence Attendance';
 
-function getRpID(req: Request): string {
-  if (process.env.WEBAUTHN_RP_ID) return process.env.WEBAUTHN_RP_ID;
-  const hostname = req.hostname || 'localhost';
+export function getRpID(req: Request): string {
+  if (process.env.WEBAUTHN_RP_ID) return process.env.WEBAUTHN_RP_ID.trim().toLowerCase();
+
+  // 1. Check Origin header
+  const origin = req.headers.origin as string;
+  if (origin) {
+    try {
+      const parsed = new URL(origin);
+      const h = parsed.hostname.toLowerCase();
+      if (h === '127.0.0.1') return 'localhost';
+      if (h) return h;
+    } catch {}
+  }
+
+  // 2. Check X-Forwarded-Host (from reverse proxy like Vite)
+  const forwardedHost = (req.headers['x-forwarded-host'] as string)?.split(':')[0]?.trim().toLowerCase();
+  if (forwardedHost) {
+    if (forwardedHost === '127.0.0.1') return 'localhost';
+    return forwardedHost;
+  }
+
+  // 3. Fallback to Host / req.hostname
+  const hostHeader = (req.headers['host'] as string)?.split(':')[0]?.trim().toLowerCase();
+  const hostname = hostHeader || req.hostname?.toLowerCase() || 'localhost';
   if (hostname === '127.0.0.1') return 'localhost';
   return hostname;
 }
 
-function getExpectedOrigins(): string[] {
-  if (process.env.WEBAUTHN_ORIGIN) {
-    return process.env.WEBAUTHN_ORIGIN.split(',').map(s => s.trim());
-  }
-  return [
+export function getExpectedOrigins(req?: Request): string[] {
+  const origins = new Set<string>([
     'http://localhost:5180',
     'http://127.0.0.1:5180',
+    'https://localhost:5180',
+    'https://127.0.0.1:5180',
     'http://localhost:4050',
-    'http://127.0.0.1:4050'
-  ];
+    'http://127.0.0.1:4050',
+    'https://localhost:4050',
+    'https://127.0.0.1:4050'
+  ]);
+
+  if (process.env.WEBAUTHN_ORIGIN) {
+    process.env.WEBAUTHN_ORIGIN.split(',').forEach(s => {
+      const trimmed = s.trim();
+      if (trimmed) origins.add(trimmed);
+    });
+  }
+
+  if (req) {
+    const reqOrigin = req.headers.origin as string;
+    if (reqOrigin) {
+      origins.add(reqOrigin);
+      try {
+        const u = new URL(reqOrigin);
+        origins.add(`${u.protocol}//${u.host.toLowerCase()}`);
+      } catch {}
+    }
+
+    const forwardedHost = req.headers['x-forwarded-host'] as string;
+    if (forwardedHost) {
+      const proto = (req.headers['x-forwarded-proto'] as string) || 'https';
+      origins.add(`${proto}://${forwardedHost}`);
+      origins.add(`https://${forwardedHost}`);
+      origins.add(`http://${forwardedHost}`);
+      origins.add(`${proto}://${forwardedHost.toLowerCase()}`);
+      origins.add(`https://${forwardedHost.toLowerCase()}`);
+      origins.add(`http://${forwardedHost.toLowerCase()}`);
+    }
+
+    const host = req.headers.host as string;
+    if (host) {
+      origins.add(`https://${host}`);
+      origins.add(`http://${host}`);
+      origins.add(`https://${host.toLowerCase()}`);
+      origins.add(`http://${host.toLowerCase()}`);
+    }
+
+    const referer = req.headers.referer as string;
+    if (referer) {
+      try {
+        const u = new URL(referer);
+        origins.add(`${u.protocol}//${u.host}`);
+        origins.add(`${u.protocol}//${u.host.toLowerCase()}`);
+      } catch {}
+    }
+  }
+
+  return Array.from(origins);
 }
 
 /**
@@ -151,7 +221,7 @@ webauthnRouter.post('/register/verify', authenticate, async (req: Request, res: 
     }
 
     const rpID = getRpID(req);
-    const expectedOrigins = getExpectedOrigins();
+    const expectedOrigins = getExpectedOrigins(req);
 
     const verification = await verifyRegistrationResponse({
       response: registrationResponse,

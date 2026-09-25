@@ -131,7 +131,7 @@ adminRouter.get('/classrooms', async (_req: Request, res: Response) => {
 
 adminRouter.post('/classrooms', async (req: Request, res: Response) => {
   try {
-    const { roomCode, buildingName, floorNumber, latitude, longitude, allowedRadiusMeters, hardwareBeaconId, isActive } = req.body;
+    const { roomCode, buildingName, floorNumber, latitude, longitude, allowedRadiusMeters, locationAccuracyMeters, hardwareBeaconId, isActive } = req.body;
 
     if (!roomCode || !buildingName || latitude === undefined || longitude === undefined) {
       return res.status(400).json({ message: 'Room code, building, latitude, and longitude are required.' });
@@ -140,6 +140,7 @@ adminRouter.post('/classrooms', async (req: Request, res: Response) => {
     const lat = parseFloat(latitude);
     const lon = parseFloat(longitude);
     const radius = allowedRadiusMeters !== undefined ? parseFloat(allowedRadiusMeters) : 25.0;
+    const accuracy = locationAccuracyMeters !== undefined && locationAccuracyMeters !== null ? parseFloat(locationAccuracyMeters) : null;
 
     if (isNaN(lat) || isNaN(lon) || isNaN(radius)) {
       return res.status(400).json({ message: 'Coordinates and radius must be valid numbers.' });
@@ -153,6 +154,7 @@ adminRouter.post('/classrooms', async (req: Request, res: Response) => {
         latitude: lat,
         longitude: lon,
         allowedRadiusMeters: radius,
+        locationAccuracyMeters: accuracy,
         hardwareBeaconId: hardwareBeaconId ? hardwareBeaconId.trim() : null,
         isActive: isActive !== undefined ? Boolean(isActive) : true
       }
@@ -166,7 +168,7 @@ adminRouter.post('/classrooms', async (req: Request, res: Response) => {
 
 adminRouter.put('/classrooms/:id', async (req: Request, res: Response) => {
   try {
-    const { roomCode, buildingName, floorNumber, latitude, longitude, allowedRadiusMeters, hardwareBeaconId, isActive } = req.body;
+    const { roomCode, buildingName, floorNumber, latitude, longitude, allowedRadiusMeters, locationAccuracyMeters, hardwareBeaconId, isActive } = req.body;
 
     const data: any = {};
     if (roomCode) data.roomCode = roomCode.trim().toUpperCase();
@@ -175,6 +177,7 @@ adminRouter.put('/classrooms/:id', async (req: Request, res: Response) => {
     if (latitude !== undefined) data.latitude = parseFloat(latitude);
     if (longitude !== undefined) data.longitude = parseFloat(longitude);
     if (allowedRadiusMeters !== undefined) data.allowedRadiusMeters = parseFloat(allowedRadiusMeters);
+    if (locationAccuracyMeters !== undefined) data.locationAccuracyMeters = locationAccuracyMeters !== null ? parseFloat(locationAccuracyMeters) : null;
     if (hardwareBeaconId !== undefined) data.hardwareBeaconId = hardwareBeaconId ? hardwareBeaconId.trim() : null;
     if (isActive !== undefined) data.isActive = Boolean(isActive);
 

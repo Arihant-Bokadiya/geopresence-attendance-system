@@ -227,7 +227,8 @@ attendanceRouter.post('/submit', authenticate, requireRole(['STUDENT']), async (
         message: presenceResult.message,
         distanceMeters: presenceResult.distanceMeters,
         allowedRadiusMeters: presenceResult.allowedRadiusMeters,
-        device: presenceResult.device
+        device: presenceResult.device,
+        diagnostics: presenceResult.diagnostics
       });
     }
 
@@ -240,7 +241,8 @@ attendanceRouter.post('/submit', authenticate, requireRole(['STUDENT']), async (
         studentPrn,
         userId: req.user!.userId,
         sessionId,
-        authPayload
+        authPayload,
+        req
       });
 
       if (!authResult.verified) {
@@ -344,7 +346,8 @@ attendanceRouter.post('/submit', authenticate, requireRole(['STUDENT']), async (
         deviceId: presenceResult.device?.deviceId,
         biometricType,
         verificationMode: authVerificationMode,
-        receiptHash
+        receiptHash,
+        diagnostics: presenceResult.diagnostics
       }
     });
   } catch (error: any) {
@@ -478,16 +481,6 @@ attendanceRouter.post('/verify-presence', authenticate, requireRole(['STUDENT'])
     const parsedLon = parseFloat(longitude);
     const parsedAcc = accuracy !== undefined ? parseFloat(accuracy) : 10.0;
 
-    if (parsedAcc > 35.0) {
-      return res.status(422).json({
-        verified: false,
-        status: 'ACCURACY_TOO_LOW',
-        message: 'GPS accuracy is too low for physical verification. Please ensure Wi-Fi is enabled to improve indoor location lock.',
-        accuracy: parsedAcc,
-        threshold: 35.0
-      });
-    }
-
     const presenceResult = await ClassroomPresenceProvider.verifyPresence({
       sessionId,
       classroomId: session.classroomId,
@@ -504,18 +497,20 @@ attendanceRouter.post('/verify-presence', authenticate, requireRole(['STUDENT'])
         distanceMeters: presenceResult.distanceMeters,
         allowedRadiusMeters: presenceResult.allowedRadiusMeters,
         classroom: session.classroom.roomCode,
-        device: presenceResult.device
+        device: presenceResult.device,
+        diagnostics: presenceResult.diagnostics
       });
     }
 
     return res.status(200).json({
       verified: true,
       status: 'PRESENCE_VERIFIED',
-      message: "Classroom presence verified via GPS and Classroom Device.",
+      message: presenceResult.message,
       distanceMeters: presenceResult.distanceMeters,
       allowedRadiusMeters: presenceResult.allowedRadiusMeters,
       classroom: session.classroom.roomCode,
-      device: presenceResult.device
+      device: presenceResult.device,
+      diagnostics: presenceResult.diagnostics
     });
   } catch (error: any) {
     res.status(500).json({ message: 'Failed to verify classroom presence.' });

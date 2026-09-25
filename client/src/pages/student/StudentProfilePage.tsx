@@ -213,8 +213,8 @@ export const StudentProfilePage: React.FC<StudentProfilePageProps> = ({ user }) 
           Windows Hello, or Android Biometric).
         </p>
 
-        {!user.isAuthenticationRegistered && (
-          <div style={{ marginTop: '0.75rem', paddingTop: '0.75rem', borderTop: '1px solid var(--border-subtle)' }}>
+        <div style={{ marginTop: '0.75rem', paddingTop: '0.75rem', borderTop: '1px solid var(--border-subtle)', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+          {!user.isAuthenticationRegistered ? (
             <Button
               variant="primary"
               size="sm"
@@ -224,8 +224,18 @@ export const StudentProfilePage: React.FC<StudentProfilePageProps> = ({ user }) 
             >
               <Smartphone size={14} /> Register Platform Authenticator Now
             </Button>
-          </div>
-        )}
+          ) : (
+            <Button
+              variant="secondary"
+              size="sm"
+              loading={registering}
+              onClick={handleRegisterAuthenticator}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}
+            >
+              <Smartphone size={14} /> Register / Add Current Phone Authenticator
+            </Button>
+          )}
+        </div>
 
         <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.75rem' }}>
           Authoritative Geofence & Cryptographic Attendance • Zero fake credentials or simulated biometrics

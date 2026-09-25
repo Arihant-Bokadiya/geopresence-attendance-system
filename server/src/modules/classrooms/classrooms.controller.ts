@@ -35,7 +35,7 @@ classroomsRouter.get('/:id', authenticate, async (req: Request, res: Response) =
 // POST /api/v1/classrooms (Admin Only)
 classroomsRouter.post('/', authenticate, requireRole(['ADMIN']), async (req: Request, res: Response) => {
   try {
-    const { roomCode, buildingName, floorNumber, latitude, longitude, allowedRadiusMeters, hardwareBeaconId } = req.body;
+    const { roomCode, buildingName, floorNumber, latitude, longitude, allowedRadiusMeters, locationAccuracyMeters, hardwareBeaconId } = req.body;
 
     if (!roomCode || !buildingName || latitude === undefined || longitude === undefined) {
       return res.status(400).json({ message: 'Room code, building, latitude, and longitude are required.' });
@@ -49,6 +49,7 @@ classroomsRouter.post('/', authenticate, requireRole(['ADMIN']), async (req: Req
         latitude: parseFloat(latitude),
         longitude: parseFloat(longitude),
         allowedRadiusMeters: parseFloat(allowedRadiusMeters) || 25.0,
+        locationAccuracyMeters: locationAccuracyMeters !== undefined && locationAccuracyMeters !== null ? parseFloat(locationAccuracyMeters) : null,
         hardwareBeaconId: hardwareBeaconId?.trim() || null,
       },
     });
@@ -65,7 +66,7 @@ classroomsRouter.post('/', authenticate, requireRole(['ADMIN']), async (req: Req
 // PUT /api/v1/classrooms/:id (Update coordinates / radius - Admin Only)
 classroomsRouter.put('/:id', authenticate, requireRole(['ADMIN']), async (req: Request, res: Response) => {
   try {
-    const { roomCode, buildingName, floorNumber, latitude, longitude, allowedRadiusMeters, hardwareBeaconId, isActive } = req.body;
+    const { roomCode, buildingName, floorNumber, latitude, longitude, allowedRadiusMeters, locationAccuracyMeters, hardwareBeaconId, isActive } = req.body;
 
     const classroom = await prisma.classroom.update({
       where: { id: req.params.id },
@@ -76,6 +77,7 @@ classroomsRouter.put('/:id', authenticate, requireRole(['ADMIN']), async (req: R
         ...(latitude !== undefined && { latitude: parseFloat(latitude) }),
         ...(longitude !== undefined && { longitude: parseFloat(longitude) }),
         ...(allowedRadiusMeters !== undefined && { allowedRadiusMeters: parseFloat(allowedRadiusMeters) }),
+        ...(locationAccuracyMeters !== undefined && { locationAccuracyMeters: locationAccuracyMeters !== null ? parseFloat(locationAccuracyMeters) : null }),
         ...(hardwareBeaconId !== undefined && { hardwareBeaconId: hardwareBeaconId?.trim() || null }),
         ...(isActive !== undefined && { isActive }),
       },

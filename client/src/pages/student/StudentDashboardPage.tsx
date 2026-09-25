@@ -257,9 +257,20 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({
               </div>
             </div>
           </div>
-          <Badge variant="present" icon={<CheckCircle2 size={12} />}>
-            AUTHORIZED
-          </Badge>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <Button
+              variant="secondary"
+              size="sm"
+              loading={registeringPhone}
+              onClick={handleRegisterPhone}
+              style={{ fontSize: '0.75rem', padding: '0.3rem 0.6rem' }}
+            >
+              Add / Re-register Phone
+            </Button>
+            <Badge variant="present" icon={<CheckCircle2 size={12} />}>
+              AUTHORIZED
+            </Badge>
+          </div>
         </div>
       )}
 

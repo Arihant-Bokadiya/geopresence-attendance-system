@@ -1,4 +1,4 @@
-const API_BASE_URL = 'http://localhost:4050/api/v1';
+const API_BASE_URL = (import.meta.env.VITE_API_URL || '/api/v1').replace(/\/+$/, '');
 
 export async function apiRequest<T = any>(
   endpoint: string,
@@ -18,7 +18,8 @@ export async function apiRequest<T = any>(
     ? (typeof options.body === 'string' ? options.body : JSON.stringify(options.body))
     : undefined;
 
-  const url = `${API_BASE_URL}${endpoint}`;
+  const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  const url = `${API_BASE_URL}${normalizedEndpoint}`;
   const response = await fetch(url, {
     ...options,
     headers,

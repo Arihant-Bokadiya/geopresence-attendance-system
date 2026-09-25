@@ -23,6 +23,14 @@ __pycache__/
 !.env.example
 !*.env.example
 
+# Local SSL/TLS Certificates and Private Keys
+certs/
+*.pem
+*.crt
+*.key
+*.p12
+*.pfx
+
 # Local Database Files (CRITICAL: NEVER COMMIT LOCAL/PRODUCTION DATABASES)
 *.db
 *.db-journal

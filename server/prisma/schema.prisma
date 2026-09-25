@@ -169,6 +169,7 @@ model Classroom {
   latitude            Float               // e.g. 18.5204303
   longitude           Float               // e.g. 73.8567437
   allowedRadiusMeters Float               @default(25.0)
+  locationAccuracyMeters Float?           // Recorded accuracy of classroom GPS anchor point
   hardwareBeaconId    String?             // Future ESP32 BLE Beacon UUID
   hardwareSecretHash  String?             // Future ESP32 HMAC Secret
   isActive            Boolean             @default(true)

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { apiRequest } from '../../utils/api.js';
+import { acquireFreshHighAccuracyPosition } from '../../utils/geolocation.js';
 import type { Classroom } from '../../types/index.js';
 import { Button } from '../../components/ui/Button.js';
 import { Badge } from '../../components/ui/Badge.js';
@@ -74,48 +75,39 @@ export const AdminClassroomsPage: React.FC = () => {
     setAllowedRadiusMeters(c.allowedRadiusMeters);
     setHardwareBeaconId(c.hardwareBeaconId || '');
     setIsActive(c.isActive);
-    setGpsAccuracy(null);
+    setGpsAccuracy(c.locationAccuracyMeters ?? null);
     setGpsTimestamp(null);
     setError(null);
     setModalOpen(true);
   };
 
-  const handleCaptureCurrentGps = () => {
-    if (!('geolocation' in navigator)) {
-      setError('Geolocation is not supported by your browser.');
-      return;
-    }
-
+  const handleCaptureCurrentGps = async () => {
     setError(null);
     setGpsAcquiring(true);
 
-    // Request fresh location every time by setting maximumAge: 0
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const freshLat = pos.coords.latitude;
-        const freshLon = pos.coords.longitude;
-        const freshAcc = pos.coords.accuracy;
+    try {
+      const pos = await acquireFreshHighAccuracyPosition({
+        timeoutMs: 15000,
+        desiredAccuracyMeters: 15.0
+      });
 
-        setLatitude(freshLat.toFixed(7));
-        setLongitude(freshLon.toFixed(7));
-        setGpsAccuracy(freshAcc);
-        setGpsTimestamp(new Date().toLocaleTimeString());
-        setGpsAcquiring(false);
-      },
-      (err) => {
-        setGpsAcquiring(false);
-        if (err.code === 1) { // PERMISSION_DENIED
-          setError('Location permission denied. Please allow location access in your browser settings.');
-        } else if (err.code === 2) { // POSITION_UNAVAILABLE
-          setError('GPS location unavailable. Please ensure location services are enabled on your device.');
-        } else if (err.code === 3) { // TIMEOUT
-          setError('Location request timed out. Please click "Use Current Location" again to retry.');
-        } else {
-          setError(`Failed to acquire GPS: ${err.message}.`);
-        }
-      },
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
-    );
+      setLatitude(pos.latitude.toFixed(7));
+      setLongitude(pos.longitude.toFixed(7));
+      setGpsAccuracy(pos.accuracy);
+      setGpsTimestamp(new Date(pos.timestamp).toLocaleTimeString());
+    } catch (err: any) {
+      if (err.code === 1) { // PERMISSION_DENIED
+        setError('Location permission denied. Please allow location access in your browser settings.');
+      } else if (err.code === 2) { // POSITION_UNAVAILABLE
+        setError('GPS location unavailable. Please ensure location services are enabled on your device.');
+      } else if (err.code === 3) { // TIMEOUT
+        setError('Location request timed out. Please click "Use Current Location" again to retry.');
+      } else {
+        setError(`Failed to acquire GPS: ${err.message || 'Unknown error'}`);
+      }
+    } finally {
+      setGpsAcquiring(false);
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -131,6 +123,7 @@ export const AdminClassroomsPage: React.FC = () => {
         latitude: parseFloat(latitude),
         longitude: parseFloat(longitude),
         allowedRadiusMeters: parseFloat(allowedRadiusMeters.toString()),
+        locationAccuracyMeters: gpsAccuracy !== null ? parseFloat(gpsAccuracy.toString()) : null,
         hardwareBeaconId: hardwareBeaconId || null,
         isActive
       };

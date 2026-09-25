@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
 import { apiRequest } from '../../utils/api.js';
+import { acquireFreshHighAccuracyPosition } from '../../utils/geolocation.js';
 import type { User } from '../../types/index.js';
 import { Button } from '../../components/ui/Button.js';
 import { Badge } from '../../components/ui/Badge.js';
@@ -179,9 +180,15 @@ export const MarkAttendancePage: React.FC<MarkAttendancePageProps> = ({
         setErrorMessage('Authentication was cancelled on your device. Attendance has not been recorded.');
       } else if (err.status === 409 || err.code === 'ALREADY_MARKED') {
         setErrorMessage('Your attendance has already been recorded for this session.');
-      } else if (err.code === 'OUTSIDE_GEOFENCE' || err.status === 422) {
-        setErrorMessage(`Geofence rejection: ${err.message}`);
-        setFlowStatus('OUTSIDE_GEOFENCE');
+      } else if (err.code === 'OUTSIDE_GEOFENCE' || err.data?.status === 'OUTSIDE_GEOFENCE' || err.status === 422) {
+        if (err.data?.status === 'ACCURACY_TOO_LOW' || err.code === 'ACCURACY_TOO_LOW') {
+          setErrorMessage(err.data?.message || err.message || 'Location accuracy is too low. Please enable high-accuracy GPS and try again.');
+          setFlowStatus('LOCATION_ERROR');
+        } else {
+          setErrorMessage(err.data?.message || err.message || "You're outside the classroom attendance area.");
+          setPresenceDetails(err.data || null);
+          setFlowStatus('OUTSIDE_GEOFENCE');
+        }
         return;
       } else if (err.status === 410 || err.code === 'SESSION_EXPIRED') {
         setErrorMessage('This attendance session has ended or expired.');
@@ -195,7 +202,7 @@ export const MarkAttendancePage: React.FC<MarkAttendancePageProps> = ({
   /**
    * PRIMARY ACTION: [ MARK ATTENDANCE ]
    * Unified pipeline:
-   * 1. Get real GPS location from device
+   * 1. Get real fresh GPS location from device GNSS hardware
    * 2. Backend calculates actual distance from classroom coordinates & verifies geofence
    * 3. If valid ("Location verified"), immediately continues to WebAuthn platform authentication
    * 4. If all checks pass, marks PRESENT
@@ -208,88 +215,86 @@ export const MarkAttendancePage: React.FC<MarkAttendancePageProps> = ({
     setErrorMessage('');
     setPresenceDetails(null);
 
-    // 1. Device Location Check
-    if (!('geolocation' in navigator)) {
+    let devCoords: { latitude: number; longitude: number; accuracy: number };
+
+    // 1. Acquire Fresh High-Accuracy Hardware GPS Fix
+    try {
+      const pos = await acquireFreshHighAccuracyPosition({
+        timeoutMs: 15000,
+        desiredAccuracyMeters: 15.0
+      });
+
+      devCoords = {
+        latitude: pos.latitude,
+        longitude: pos.longitude,
+        accuracy: pos.accuracy
+      };
+      setCoords(devCoords);
+    } catch (err: any) {
       setFlowStatus('LOCATION_ERROR');
-      setErrorMessage('Geolocation is not supported by your device browser.');
+      if (err.code === 1) { // PERMISSION_DENIED
+        setErrorMessage('Location permission denied. Please allow location access in your browser settings to mark attendance.');
+      } else if (err.code === 2) {
+        setErrorMessage('GPS position unavailable. Please ensure location services are enabled on your device.');
+      } else if (err.code === 3) {
+        setErrorMessage('GPS request timed out. Please try again with clear location reception.');
+      } else {
+        setErrorMessage(`Location error: ${err.message || 'Unable to acquire location'}. Please try again.`);
+      }
       return;
     }
 
-    navigator.geolocation.getCurrentPosition(
-      async (pos) => {
-        const accuracy = pos.coords.accuracy || 10.0;
-        if (accuracy > 50) {
-          setFlowStatus('LOCATION_ERROR');
-          setErrorMessage(`Location accuracy is too low (${Math.round(accuracy)}m). Please enable high-accuracy GPS and try again.`);
-          return;
+    // 2. Authoritative Backend Distance Calculation & Geofence Verification
+    setFlowStatus('CHECKING_GEOFENCE');
+    try {
+      const res = await apiRequest<any>('/attendance/verify-presence', {
+        method: 'POST',
+        body: {
+          sessionId: activeSession.id,
+          latitude: devCoords.latitude,
+          longitude: devCoords.longitude,
+          accuracy: devCoords.accuracy
         }
+      });
 
-        const devCoords = {
-          latitude: pos.coords.latitude,
-          longitude: pos.coords.longitude,
-          accuracy
-        };
-        setCoords(devCoords);
+      if (res.verified) {
+        setPresenceDetails(res);
+        setFlowStatus('LOCATION_VERIFIED');
 
-        // 2. Backend Calculates Actual Distance & Geofence
-        setFlowStatus('CHECKING_GEOFENCE');
-        try {
-          const res = await apiRequest<any>('/attendance/verify-presence', {
-            method: 'POST',
-            body: {
-              sessionId: activeSession.id,
-              latitude: devCoords.latitude,
-              longitude: devCoords.longitude,
-              accuracy: devCoords.accuracy
-            }
-          });
-
-          if (res.verified) {
-            setPresenceDetails(res);
-            setFlowStatus('LOCATION_VERIFIED');
-
-            // 3. Location verified! If phone not registered, ask to register; otherwise authenticate
-            if (!isPhoneRegistered) {
-              setFlowStatus('NEEDS_PHONE_SETUP');
-            } else {
-              await executeBiometricAuthentication(devCoords);
-            }
-          } else {
-            setPresenceDetails(res);
-            setFlowStatus('OUTSIDE_GEOFENCE');
-          }
-        } catch (err: any) {
-          if (err.status === 422 || err.code === 'OUTSIDE_GEOFENCE' || err.status === 'OUTSIDE_GEOFENCE') {
-            setPresenceDetails({
-              verified: false,
-              distanceMeters: err.distanceMeters,
-              allowedRadiusMeters: err.allowedRadiusMeters,
-              message: err.message || "You're outside the classroom attendance area."
-            });
-            setFlowStatus('OUTSIDE_GEOFENCE');
-          } else if (err.code === 'ACCURACY_TOO_LOW') {
-            setFlowStatus('LOCATION_ERROR');
-            setErrorMessage(err.message || 'Location accuracy is too low. Please enable high-accuracy GPS and try again.');
-          } else {
-            setFlowStatus('LOCATION_ERROR');
-            setErrorMessage(err.message || 'Server communication error during presence check.');
-          }
-        }
-      },
-      (err) => {
-        setFlowStatus('LOCATION_ERROR');
-        if (err.code === 1) { // PERMISSION_DENIED
-          setErrorMessage('Location permission denied. Please allow location access in your browser settings to mark attendance.');
-        } else if (err.code === 2) {
-          setErrorMessage('GPS position unavailable. Please ensure location services are enabled on your device.');
-        } else if (err.code === 3) {
-          setErrorMessage('GPS request timed out. Please try again with clear location reception.');
+        // 3. Location verified! Continue to WebAuthn platform authentication
+        if (!isPhoneRegistered) {
+          setFlowStatus('NEEDS_PHONE_SETUP');
         } else {
-          setErrorMessage(`Location error: ${err.message}. Please try again.`);
+          await executeBiometricAuthentication(devCoords);
         }
-      },
-      { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 }
-    );
+      } else {
+        setPresenceDetails(res);
+        if (res.status === 'ACCURACY_TOO_LOW') {
+          setFlowStatus('LOCATION_ERROR');
+          setErrorMessage(res.message);
+        } else {
+          setFlowStatus('OUTSIDE_GEOFENCE');
+        }
+      }
+    } catch (err: any) {
+      const errData = err.data || {};
+      if (errData.status === 'ACCURACY_TOO_LOW' || err.code === 'ACCURACY_TOO_LOW') {
+        setFlowStatus('LOCATION_ERROR');
+        setErrorMessage(errData.message || err.message || 'Location accuracy is too low. Please enable high-accuracy GPS and try again.');
+      } else if (err.status === 422 || err.code === 'OUTSIDE_GEOFENCE' || errData.status === 'OUTSIDE_GEOFENCE') {
+        setPresenceDetails({
+          verified: false,
+          distanceMeters: errData.distanceMeters ?? err.distanceMeters,
+          allowedRadiusMeters: errData.allowedRadiusMeters ?? err.allowedRadiusMeters,
+          message: errData.message || err.message || "You're outside the classroom attendance area.",
+          diagnostics: errData.diagnostics
+        });
+        setFlowStatus('OUTSIDE_GEOFENCE');
+      } else {
+        setFlowStatus('LOCATION_ERROR');
+        setErrorMessage(err.message || 'Server communication error during presence check.');
+      }
+    }
   };
 
   // Loading State
@@ -563,6 +568,17 @@ export const MarkAttendancePage: React.FC<MarkAttendancePageProps> = ({
         {flowStatus === 'AUTH_ERROR' && (
           <div style={{ marginBottom: '1.25rem' }}>
             <Alert variant="danger" message={errorMessage} />
+            <div style={{ marginTop: '0.6rem', textAlign: 'center' }}>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={handleRegisterPhone}
+                disabled={registeringPhone}
+                style={{ fontSize: '0.78rem' }}
+              >
+                {registeringPhone ? 'Registering Phone...' : '📱 Register / Add this Phone Authenticator'}
+              </button>
+            </div>
           </div>
         )}
 

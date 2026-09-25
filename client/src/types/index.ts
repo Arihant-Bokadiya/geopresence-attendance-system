@@ -70,6 +70,7 @@ export interface Classroom {
   latitude: number;
   longitude: number;
   allowedRadiusMeters: number;
+  locationAccuracyMeters?: number | null;
   hardwareBeaconId?: string;
   isActive: boolean;
   device?: ClassroomDevice;

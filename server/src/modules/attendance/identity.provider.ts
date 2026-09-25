@@ -1,6 +1,8 @@
+import { Request } from 'express';
 import { verifyAuthenticationResponse, type AuthenticatorTransport } from '@simplewebauthn/server';
 import { prisma } from '../../db.js';
 import { cacheService } from '../../utils/cache.js';
+import { getExpectedOrigins, getRpID } from '../webauthn/webauthn.controller.js';
 
 export interface IdentityAuthVerificationRequest {
   studentPrn: string;
@@ -17,6 +19,7 @@ export interface IdentityAuthVerificationRequest {
     simulatedFailure?: boolean;
     verificationTimestamp?: string;
   };
+  req?: Request;
 }
 
 export interface IdentityAuthResult {
@@ -106,16 +109,19 @@ export class IdentityAuthenticationProvider {
       }
 
       try {
-        const expectedOrigins = process.env.WEBAUTHN_ORIGIN 
-          ? process.env.WEBAUTHN_ORIGIN.split(',').map(s => s.trim())
-          : [
-              'http://localhost:5180',
-              'http://127.0.0.1:5180',
-              'http://localhost:4050',
-              'http://127.0.0.1:4050'
-            ];
+        const expectedOrigins = getExpectedOrigins(request.req);
+        if (process.env.WEBAUTHN_ORIGIN) {
+          process.env.WEBAUTHN_ORIGIN.split(',').forEach(s => {
+            const trimmed = s.trim();
+            if (trimmed && !expectedOrigins.includes(trimmed)) {
+              expectedOrigins.push(trimmed);
+            }
+          });
+        }
 
-        const expectedRPID = process.env.WEBAUTHN_RP_ID || 'localhost';
+        const expectedRPID = (process.env.WEBAUTHN_RP_ID && process.env.WEBAUTHN_RP_ID.trim())
+          ? process.env.WEBAUTHN_RP_ID.trim().toLowerCase()
+          : (request.req ? getRpID(request.req) : 'localhost');
 
         const verification = await verifyAuthenticationResponse({
           response,
