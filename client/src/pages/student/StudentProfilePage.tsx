@@ -7,6 +7,14 @@ import { Alert } from '../../components/ui/Alert.js';
 import { startRegistration } from '@simplewebauthn/browser';
 import { apiRequest } from '../../utils/api.js';
 import {
+  probeWebAuthnEnvironment,
+  analyzeWebAuthnFailure,
+  sendWebAuthnDiagnostics,
+  type WebAuthnFailureReport,
+  type WebAuthnEnvironmentReport
+} from '../../utils/webauthnDiagnostics.js';
+import { WebAuthnDiagnosticsCard } from '../../components/common/WebAuthnDiagnosticsCard.js';
+import {
   User as UserIcon,
   Shield,
   LogOut,
@@ -31,14 +39,22 @@ export const StudentProfilePage: React.FC<StudentProfilePageProps> = ({ user }) 
   const [registering, setRegistering] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [authSuccess, setAuthSuccess] = useState<string | null>(null);
+  const [failureReport, setFailureReport] = useState<WebAuthnFailureReport | null>(null);
+  const [envReport, setEnvReport] = useState<WebAuthnEnvironmentReport | null>(null);
 
   const handleRegisterAuthenticator = async () => {
     setRegistering(true);
     setAuthError(null);
     setAuthSuccess(null);
+    setFailureReport(null);
+
+    const env = await probeWebAuthnEnvironment();
+    setEnvReport(env);
+
+    let options: any = null;
 
     try {
-      const options = await apiRequest<any>('/auth/webauthn/register/options', { method: 'POST' });
+      options = await apiRequest<any>('/auth/webauthn/register/options', { method: 'POST' });
       const regResponse = await startRegistration({ optionsJSON: options });
 
       const verifyRes = await apiRequest<{ verified: boolean; message?: string }>('/auth/webauthn/register/verify', {
@@ -55,14 +71,32 @@ export const StudentProfilePage: React.FC<StudentProfilePageProps> = ({ user }) 
         setAuthSuccess('Platform authenticator registered successfully! Your attendance punches are now secured.');
         updateUser({ isAuthenticationRegistered: true });
       } else {
+        const verifyError = new Error(verifyRes.message || 'Authenticator verification rejected by server');
+        const report = analyzeWebAuthnFailure(verifyError, env, 'VERIFICATION', options);
+        setFailureReport(report);
+        sendWebAuthnDiagnostics(report);
         setAuthError(verifyRes.message || 'Authenticator verification failed.');
       }
     } catch (err: any) {
       console.error('Authenticator registration error:', err);
-      if (err.name === 'NotAllowedError') {
-        setAuthError('Authentication registration ceremony was cancelled on your device.');
+      const stage = !options ? 'OPTIONS_FETCH' : 'CEREMONY';
+      const report = analyzeWebAuthnFailure(err, env, stage, options);
+      setFailureReport(report);
+      sendWebAuthnDiagnostics(report);
+
+      const errName = report.errorName;
+      const errMsg = report.errorMessage;
+
+      if (errName === 'NotAllowedError') {
+        if (errMsg && errMsg.toLowerCase().includes('cancel')) {
+          setAuthError('Authentication registration ceremony was cancelled on your device.');
+        } else if (errMsg && errMsg.length > 0 && !errMsg.includes('[object')) {
+          setAuthError(`Authentication not permitted (${errName}): ${errMsg}`);
+        } else {
+          setAuthError('Authentication registration was not permitted or cancelled by your device/browser.');
+        }
       } else {
-        setAuthError(err.message || 'Failed to complete platform authenticator registration.');
+        setAuthError(errMsg || 'Failed to complete platform authenticator registration.');
       }
     } finally {
       setRegistering(false);
@@ -204,6 +238,12 @@ export const StudentProfilePage: React.FC<StudentProfilePageProps> = ({ user }) 
         {authError && (
           <div style={{ marginBottom: '0.75rem' }}>
             <Alert variant="danger">{authError}</Alert>
+
+            <WebAuthnDiagnosticsCard
+              failureReport={failureReport}
+              envReport={envReport}
+              onRetest={() => probeWebAuthnEnvironment().then(setEnvReport)}
+            />
           </div>
         )}
 

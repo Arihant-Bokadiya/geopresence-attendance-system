@@ -104,6 +104,50 @@ export function getExpectedOrigins(req?: Request): string[] {
 }
 
 /**
+ * POST /api/v1/auth/webauthn/diagnostics
+ * Receives detailed client-side WebAuthn telemetry and browser diagnostic data
+ * Used to diagnose multi-device errors (Brave, Android, iOS, Chrome, certificate errors)
+ */
+webauthnRouter.post('/diagnostics', async (req: Request, res: Response) => {
+  const d = req.body || {};
+  console.log('\n================================================================');
+  console.log('📱 [WEBAUTHN CLIENT TELEMETRY & DIAGNOSTICS REPORT]');
+  console.log('Timestamp       :', d.timestamp || new Date().toISOString());
+  console.log('Client IP       :', req.ip || req.socket.remoteAddress);
+  console.log('User Agent      :', req.headers['user-agent']);
+  console.log('Origin Header   :', req.headers.origin);
+  console.log('Host Header     :', req.headers.host);
+  console.log('Protocol        :', d.protocol, '| isSecureContext:', d.isSecureContext);
+  console.log('PublicKeyCred   :', d.hasPublicKeyCredential ? 'AVAILABLE' : 'UNAVAILABLE');
+  console.log('Platform Auth   :', d.platformAuthenticatorAvailable !== undefined ? d.platformAuthenticatorAvailable : 'UNKNOWN');
+  console.log('Brave Browser   :', d.isBrave ? 'YES (Brave)' : 'No / Standard');
+  console.log('Client Hostname :', d.hostname, '| RP ID in Options:', d.rpIdExpected);
+  console.log('RP ID Match     :', d.rpIdMatchesHostname ? 'MATCH' : 'MISMATCH');
+  console.log('Failure Stage   :', d.stage || 'UNKNOWN');
+  if (d.errorName || d.errorMessage) {
+    console.log('----------------------------------------------------------------');
+    console.log('🚨 REAL BROWSER ERROR CAPTURED:');
+    console.log('Error Name      :', d.errorName);
+    console.log('Error Message   :', d.errorMessage);
+    console.log('Error Code      :', d.errorCode || 'N/A');
+    if (d.errorCause) {
+      console.log('Error Cause     :', JSON.stringify(d.errorCause));
+    }
+  }
+  if (d.probableRootCause) {
+    console.log('Probable Cause  :', d.probableRootCause);
+  }
+  console.log('================================================================\n');
+
+  res.json({
+    received: true,
+    serverTimestamp: new Date().toISOString(),
+    expectedOrigins: getExpectedOrigins(req),
+    computedRpId: getRpID(req)
+  });
+});
+
+/**
  * GET /api/v1/auth/webauthn/status
  * Check if the authenticated student has registered a phone/platform authenticator
  */

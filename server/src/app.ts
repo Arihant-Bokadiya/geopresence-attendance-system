@@ -34,6 +34,11 @@ const isAllowedOrigin = (origin: string | undefined): boolean => {
         hostname === '127.0.0.1' ||
         hostname.endsWith('.local') ||
         hostname.endsWith('.nip.io') ||
+        hostname.endsWith('.sslip.io') ||
+        hostname.endsWith('.trycloudflare.com') ||
+        hostname.endsWith('.ngrok-free.app') ||
+        hostname.endsWith('.ngrok.io') ||
+        hostname.endsWith('.loca.lt') ||
         /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname) ||
         /^192\.168\.\d{1,3}\.\d{1,3}$/.test(hostname) ||
         /^172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}$/.test(hostname)
@@ -92,30 +97,38 @@ app.get('/health', (_req: Request, res: Response) => {
   });
 });
 
-// Endpoint to download local development mkcert Root CA certificate for iPhone / mobile trust
-const serveRootCA = (_req: Request, res: Response) => {
+// Endpoint to download local development mkcert Root CA certificate for Android & iPhone trust
+const serveCAHandler = (ext: 'pem' | 'crt' | 'der') => (req: Request, res: Response) => {
+  const filename = ext === 'crt' ? 'rootCA.crt' : ext === 'der' ? 'rootCA.der' : 'rootCA.pem';
+  const downloadName = ext === 'crt' ? 'ca.crt' : ext === 'der' ? 'ca.der' : 'rootCA.pem';
   const possiblePaths = [
-    path.resolve(process.cwd(), 'certs/rootCA.pem'),
-    path.resolve(process.cwd(), '../certs/rootCA.pem'),
-    path.resolve(process.cwd(), '../../certs/rootCA.pem'),
+    path.resolve(process.cwd(), `certs/${filename}`),
+    path.resolve(process.cwd(), `../certs/${filename}`),
+    path.resolve(process.cwd(), `../../certs/${filename}`),
+    path.resolve(process.cwd(), `certs/rootCA.pem`),
+    path.resolve(process.cwd(), `../certs/rootCA.pem`),
     path.resolve(process.env.HOME || '', 'Library/Application Support/mkcert/rootCA.pem')
   ];
 
   for (const certPath of possiblePaths) {
     if (fs.existsSync(certPath)) {
       res.setHeader('Content-Type', 'application/x-x509-ca-cert');
-      res.setHeader('Content-Disposition', 'inline; filename="rootCA.pem"');
+      res.setHeader('Content-Disposition', `inline; filename="${downloadName}"`);
       return res.sendFile(certPath);
     }
   }
 
   res.status(404).json({
-    error: 'Root CA certificate not found on server. Run scripts/generate-certs.sh first.'
+    error: `Root CA certificate not found on server. Run scripts/generate-certs.sh first.`
   });
 };
 
-app.get('/ca.pem', serveRootCA);
-app.get('/api/v1/ca.pem', serveRootCA);
+app.get('/ca.crt', serveCAHandler('crt'));
+app.get('/api/v1/ca.crt', serveCAHandler('crt'));
+app.get('/ca.pem', serveCAHandler('pem'));
+app.get('/api/v1/ca.pem', serveCAHandler('pem'));
+app.get('/ca.der', serveCAHandler('der'));
+app.get('/api/v1/ca.der', serveCAHandler('der'));
 
 // API v1 Routes
 app.use('/api/v1/auth', authRouter);

@@ -42,6 +42,7 @@ export default defineConfig({
     host: '0.0.0.0',
     port: 5180,
     strictPort: true,
+    allowedHosts: true,
     https: httpsConfig,
     proxy: {
       '/api': {
@@ -52,7 +53,10 @@ export default defineConfig({
         configure: (proxy) => {
           proxy.on('proxyReq', (proxyReq, req) => {
             // Forward HTTPS protocol indicator so Express knows request was TLS-secured
-            const isEncrypted = Boolean((req.socket as any)?.encrypted) || Boolean(httpsConfig);
+            const isEncrypted =
+              req.headers['x-forwarded-proto'] === 'https' ||
+              Boolean((req.socket as any)?.encrypted) ||
+              Boolean(httpsConfig);
             proxyReq.setHeader('x-forwarded-proto', isEncrypted ? 'https' : 'http');
           });
         }
@@ -63,6 +67,7 @@ export default defineConfig({
     host: '0.0.0.0',
     port: 5180,
     strictPort: true,
+    allowedHosts: true,
     https: httpsConfig,
     proxy: {
       '/api': {
@@ -72,7 +77,10 @@ export default defineConfig({
         secure: false,
         configure: (proxy) => {
           proxy.on('proxyReq', (proxyReq, req) => {
-            const isEncrypted = Boolean((req.socket as any)?.encrypted) || Boolean(httpsConfig);
+            const isEncrypted =
+              req.headers['x-forwarded-proto'] === 'https' ||
+              Boolean((req.socket as any)?.encrypted) ||
+              Boolean(httpsConfig);
             proxyReq.setHeader('x-forwarded-proto', isEncrypted ? 'https' : 'http');
           });
         }

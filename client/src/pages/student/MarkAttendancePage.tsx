@@ -11,6 +11,14 @@ import {
   MapPin, CheckCircle2, XCircle, RefreshCw,
   ArrowLeft, Radio, Fingerprint, Smartphone, ShieldCheck, AlertCircle
 } from 'lucide-react';
+import {
+  probeWebAuthnEnvironment,
+  analyzeWebAuthnFailure,
+  sendWebAuthnDiagnostics,
+  type WebAuthnFailureReport,
+  type WebAuthnEnvironmentReport
+} from '../../utils/webauthnDiagnostics.js';
+import { WebAuthnDiagnosticsCard } from '../../components/common/WebAuthnDiagnosticsCard.js';
 
 interface MarkAttendancePageProps {
   user: User;
@@ -50,6 +58,8 @@ export const MarkAttendancePage: React.FC<MarkAttendancePageProps> = ({
   // Phone Biometric Authentication State
   const [isPhoneRegistered, setIsPhoneRegistered] = useState(false);
   const [registeringPhone, setRegisteringPhone] = useState(false);
+  const [failureReport, setFailureReport] = useState<WebAuthnFailureReport | null>(null);
+  const [envReport, setEnvReport] = useState<WebAuthnEnvironmentReport | null>(null);
 
   // Final Confirmation State
   const [attendanceSuccess, setAttendanceSuccess] = useState<any | null>(null);
@@ -104,11 +114,17 @@ export const MarkAttendancePage: React.FC<MarkAttendancePageProps> = ({
 
   // Register Phone Platform Authenticator
   const handleRegisterPhone = async () => {
-    try {
-      setRegisteringPhone(true);
-      setErrorMessage('');
+    setRegisteringPhone(true);
+    setErrorMessage('');
+    setFailureReport(null);
 
-      const options = await apiRequest<any>('/auth/webauthn/register/options', { method: 'POST' });
+    const env = await probeWebAuthnEnvironment();
+    setEnvReport(env);
+
+    let options: any = null;
+
+    try {
+      options = await apiRequest<any>('/auth/webauthn/register/options', { method: 'POST' });
       const regResponse = await startRegistration({ optionsJSON: options });
 
       const verifyRes = await apiRequest<any>('/auth/webauthn/register/verify', {
@@ -127,13 +143,34 @@ export const MarkAttendancePage: React.FC<MarkAttendancePageProps> = ({
         } else {
           setFlowStatus('IDLE');
         }
+      } else {
+        const verifyError = new Error(verifyRes.message || 'Verification rejected by server');
+        const report = analyzeWebAuthnFailure(verifyError, env, 'VERIFICATION', options);
+        setFailureReport(report);
+        sendWebAuthnDiagnostics(report);
+        setErrorMessage(verifyRes.message || 'Server rejected phone registration.');
+        setFlowStatus('AUTH_ERROR');
       }
     } catch (err: any) {
       console.error('Registration error:', err);
-      if (err.name === 'NotAllowedError') {
-        setErrorMessage('Phone registration was cancelled on your device.');
+      const stage = !options ? 'OPTIONS_FETCH' : 'CEREMONY';
+      const report = analyzeWebAuthnFailure(err, env, stage, options);
+      setFailureReport(report);
+      sendWebAuthnDiagnostics(report);
+
+      const errName = report.errorName;
+      const errMsg = report.errorMessage;
+
+      if (errName === 'NotAllowedError') {
+        if (errMsg && errMsg.toLowerCase().includes('cancel')) {
+          setErrorMessage('Phone registration was cancelled on your device.');
+        } else if (errMsg && errMsg.length > 0 && !errMsg.includes('[object')) {
+          setErrorMessage(`Registration not permitted (${errName}): ${errMsg}`);
+        } else {
+          setErrorMessage('Phone registration was not permitted or cancelled by your device/browser.');
+        }
       } else {
-        setErrorMessage(err.message || 'Failed to register phone authenticator.');
+        setErrorMessage(errMsg || 'Failed to register phone authenticator.');
       }
       setFlowStatus('AUTH_ERROR');
     } finally {
@@ -145,10 +182,16 @@ export const MarkAttendancePage: React.FC<MarkAttendancePageProps> = ({
   const executeBiometricAuthentication = async (currentCoords: { latitude: number; longitude: number; accuracy: number }) => {
     setFlowStatus('AUTHENTICATING_PHONE');
     setErrorMessage('');
+    setFailureReport(null);
+
+    const env = await probeWebAuthnEnvironment();
+    setEnvReport(env);
+
+    let options: any = null;
 
     try {
       // 1. Get Cryptographic Challenge from Backend
-      const options = await apiRequest<any>('/auth/webauthn/authenticate/options', {
+      options = await apiRequest<any>('/auth/webauthn/authenticate/options', {
         method: 'POST',
         body: { sessionId: activeSession.id }
       });
@@ -177,7 +220,19 @@ export const MarkAttendancePage: React.FC<MarkAttendancePageProps> = ({
     } catch (err: any) {
       console.error('Phone authentication error:', err);
       if (err.name === 'NotAllowedError') {
-        setErrorMessage('Authentication was cancelled on your device. Attendance has not been recorded.');
+        const stage = !options ? 'OPTIONS_FETCH' : 'CEREMONY';
+        const report = analyzeWebAuthnFailure(err, env, stage, options);
+        setFailureReport(report);
+        sendWebAuthnDiagnostics(report);
+
+        const errMsg = report.errorMessage;
+        if (errMsg && errMsg.toLowerCase().includes('cancel')) {
+          setErrorMessage('Authentication was cancelled on your device. Attendance has not been recorded.');
+        } else if (errMsg && errMsg.length > 0 && !errMsg.includes('[object')) {
+          setErrorMessage(`Authentication not permitted (${report.errorName}): ${errMsg}`);
+        } else {
+          setErrorMessage('Phone authentication was not permitted or cancelled by your device/browser.');
+        }
       } else if (err.status === 409 || err.code === 'ALREADY_MARKED') {
         setErrorMessage('Your attendance has already been recorded for this session.');
       } else if (err.code === 'OUTSIDE_GEOFENCE' || err.data?.status === 'OUTSIDE_GEOFENCE' || err.status === 422) {
@@ -193,6 +248,10 @@ export const MarkAttendancePage: React.FC<MarkAttendancePageProps> = ({
       } else if (err.status === 410 || err.code === 'SESSION_EXPIRED') {
         setErrorMessage('This attendance session has ended or expired.');
       } else {
+        const stage = !options ? 'OPTIONS_FETCH' : 'CEREMONY';
+        const report = analyzeWebAuthnFailure(err, env, stage, options);
+        setFailureReport(report);
+        sendWebAuthnDiagnostics(report);
         setErrorMessage(err.message || 'Phone authentication failed. Your attendance has not been recorded.');
       }
       setFlowStatus('AUTH_ERROR');
@@ -579,6 +638,12 @@ export const MarkAttendancePage: React.FC<MarkAttendancePageProps> = ({
                 {registeringPhone ? 'Registering Phone...' : '📱 Register / Add this Phone Authenticator'}
               </button>
             </div>
+
+            <WebAuthnDiagnosticsCard
+              failureReport={failureReport}
+              envReport={envReport}
+              onRetest={() => probeWebAuthnEnvironment().then(setEnvReport)}
+            />
           </div>
         )}
 

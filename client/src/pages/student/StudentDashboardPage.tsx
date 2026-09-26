@@ -7,6 +7,14 @@ import { Badge } from '../../components/ui/Badge.js';
 import { 
   ShieldCheck, Radio, RefreshCw, CheckCircle2, Smartphone, AlertCircle
 } from 'lucide-react';
+import {
+  probeWebAuthnEnvironment,
+  analyzeWebAuthnFailure,
+  sendWebAuthnDiagnostics,
+  type WebAuthnFailureReport,
+  type WebAuthnEnvironmentReport
+} from '../../utils/webauthnDiagnostics.js';
+import { WebAuthnDiagnosticsCard } from '../../components/common/WebAuthnDiagnosticsCard.js';
 
 interface StudentDashboardPageProps {
   user: User;
@@ -20,9 +28,11 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({
   const [activeSessions, setActiveSessions] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // WebAuthn Phone Authenticator Status
+  // WebAuthn Phone Authenticator Status & Diagnostics
   const [isPhoneRegistered, setIsPhoneRegistered] = useState<boolean>(false);
   const [checkingPhoneAuth, setCheckingPhoneAuth] = useState<boolean>(true);
+  const [failureReport, setFailureReport] = useState<WebAuthnFailureReport | null>(null);
+  const [envReport, setEnvReport] = useState<WebAuthnEnvironmentReport | null>(null);
   const [registeringPhone, setRegisteringPhone] = useState<boolean>(false);
   const [regFeedback, setRegFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
@@ -46,12 +56,18 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({
   };
 
   const handleRegisterPhone = async () => {
-    try {
-      setRegisteringPhone(true);
-      setRegFeedback(null);
+    setRegisteringPhone(true);
+    setRegFeedback(null);
+    setFailureReport(null);
 
+    const env = await probeWebAuthnEnvironment();
+    setEnvReport(env);
+
+    let options: any = null;
+
+    try {
       // Step 1: Request Registration Options from Backend
-      const options = await apiRequest<any>('/auth/webauthn/register/options', {
+      options = await apiRequest<any>('/auth/webauthn/register/options', {
         method: 'POST'
       });
 
@@ -73,18 +89,47 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({
           type: 'success',
           message: '✓ Phone platform authentication registered successfully! Your device is now authorized.'
         });
+      } else {
+        const verifyError = new Error(verifyRes.message || 'Server rejected registration response');
+        const report = analyzeWebAuthnFailure(verifyError, env, 'VERIFICATION', options);
+        setFailureReport(report);
+        sendWebAuthnDiagnostics(report);
+        setRegFeedback({
+          type: 'error',
+          message: verifyRes.message || 'Server rejected phone authentication registration.'
+        });
       }
     } catch (err: any) {
       console.error('Phone registration error:', err);
-      if (err.name === 'NotAllowedError') {
-        setRegFeedback({
-          type: 'error',
-          message: 'Registration was cancelled on your device.'
-        });
+      const stage = !options ? 'OPTIONS_FETCH' : 'CEREMONY';
+      const report = analyzeWebAuthnFailure(err, env, stage, options);
+      setFailureReport(report);
+      sendWebAuthnDiagnostics(report);
+
+      const errName = report.errorName;
+      const errMsg = report.errorMessage;
+
+      if (errName === 'NotAllowedError') {
+        if (errMsg && errMsg.toLowerCase().includes('cancel')) {
+          setRegFeedback({
+            type: 'error',
+            message: 'Registration was cancelled on your device.'
+          });
+        } else if (errMsg && errMsg.length > 0 && !errMsg.includes('[object')) {
+          setRegFeedback({
+            type: 'error',
+            message: `Registration not permitted (${errName}): ${errMsg}`
+          });
+        } else {
+          setRegFeedback({
+            type: 'error',
+            message: 'Registration was not permitted or cancelled by your device/browser.'
+          });
+        }
       } else {
         setRegFeedback({
           type: 'error',
-          message: err.message || 'Failed to complete phone registration.'
+          message: errMsg || 'Failed to complete phone registration.'
         });
       }
     } finally {
@@ -218,6 +263,12 @@ export const StudentDashboardPage: React.FC<StudentDashboardPageProps> = ({
               border: `1px solid ${regFeedback.type === 'error' ? 'var(--color-danger-border)' : 'var(--color-success-border)'}`
             }}>
               {regFeedback.message}
+
+              <WebAuthnDiagnosticsCard
+                failureReport={failureReport}
+                envReport={envReport}
+                onRetest={() => probeWebAuthnEnvironment().then(setEnvReport)}
+              />
             </div>
           )}
 

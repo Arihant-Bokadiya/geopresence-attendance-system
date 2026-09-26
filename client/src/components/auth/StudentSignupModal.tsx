@@ -4,6 +4,14 @@ import { apiRequest } from '../../utils/api.js';
 import { Button } from '../ui/Button.js';
 import { Alert } from '../ui/Alert.js';
 import {
+  probeWebAuthnEnvironment,
+  analyzeWebAuthnFailure,
+  sendWebAuthnDiagnostics,
+  type WebAuthnFailureReport,
+  type WebAuthnEnvironmentReport
+} from '../../utils/webauthnDiagnostics.js';
+import { WebAuthnDiagnosticsCard } from '../common/WebAuthnDiagnosticsCard.js';
+import {
   GraduationCap,
   ShieldCheck,
   CheckCircle2,
@@ -81,6 +89,15 @@ export const StudentSignupModal: React.FC<StudentSignupModalProps> = ({
   // WebAuthn Registration State
   const [registeringAuth, setRegisteringAuth] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [failureReport, setFailureReport] = useState<WebAuthnFailureReport | null>(null);
+  const [envReport, setEnvReport] = useState<WebAuthnEnvironmentReport | null>(null);
+
+  // Probe environment when transitioning to AUTHENTICATION step
+  useEffect(() => {
+    if (step === 'AUTHENTICATION') {
+      probeWebAuthnEnvironment().then(setEnvReport);
+    }
+  }, [step]);
 
   // Load active academic options when modal opens
   useEffect(() => {
@@ -220,10 +237,16 @@ export const StudentSignupModal: React.FC<StudentSignupModalProps> = ({
 
     setRegisteringAuth(true);
     setAuthError(null);
+    setFailureReport(null);
+
+    const env = await probeWebAuthnEnvironment();
+    setEnvReport(env);
+
+    let options: any = null;
 
     try {
       // 1. Fetch registration challenge options from backend with the student's auth token
-      const options = await apiRequest<any>('/auth/webauthn/register/options', {
+      options = await apiRequest<any>('/auth/webauthn/register/options', {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${registeredStudent.token}`
@@ -250,14 +273,32 @@ export const StudentSignupModal: React.FC<StudentSignupModalProps> = ({
       if (verifyRes.verified) {
         setStep('COMPLETE');
       } else {
+        const verifyError = new Error(verifyRes.message || 'Authenticator verification was not accepted by security server');
+        const report = analyzeWebAuthnFailure(verifyError, env, 'VERIFICATION', options);
+        setFailureReport(report);
+        sendWebAuthnDiagnostics(report);
         setAuthError(verifyRes.message || 'Authenticator verification was not accepted by the security server.');
       }
     } catch (err: any) {
       console.error('WebAuthn ceremony error:', err);
-      if (err.name === 'NotAllowedError') {
-        setAuthError('Secure authentication setup was cancelled. Please complete authentication to finish registration.');
+      const stage = !options ? 'OPTIONS_FETCH' : 'CEREMONY';
+      const report = analyzeWebAuthnFailure(err, env, stage, options);
+      setFailureReport(report);
+      sendWebAuthnDiagnostics(report);
+
+      const errName = report.errorName;
+      const errMsg = report.errorMessage;
+
+      if (errName === 'NotAllowedError') {
+        if (errMsg && errMsg.toLowerCase().includes('cancel')) {
+          setAuthError('Secure authentication prompt was cancelled on your device.');
+        } else if (errMsg && errMsg.length > 0 && !errMsg.includes('[object')) {
+          setAuthError(`Authentication not permitted (${errName}): ${errMsg}`);
+        } else {
+          setAuthError('Secure authentication setup was not permitted or cancelled by your device/browser.');
+        }
       } else {
-        setAuthError(err.message || 'Platform authenticator registration failed. Ensure your device supports biometrics or screen lock.');
+        setAuthError(errMsg || 'Platform authenticator registration failed. Ensure your device supports biometrics or screen lock.');
       }
     } finally {
       setRegisteringAuth(false);
@@ -754,6 +795,21 @@ export const StudentSignupModal: React.FC<StudentSignupModalProps> = ({
                       </div>
                     </div>
                   </Alert>
+
+                  <WebAuthnDiagnosticsCard
+                    failureReport={failureReport}
+                    envReport={envReport}
+                    onRetest={() => probeWebAuthnEnvironment().then(setEnvReport)}
+                  />
+                </div>
+              )}
+
+              {!authError && envReport && (envReport.platformAuthenticatorAvailable === false || !envReport.isSecureContext) && (
+                <div style={{ marginBottom: '1.25rem', textAlign: 'left' }}>
+                  <WebAuthnDiagnosticsCard
+                    envReport={envReport}
+                    onRetest={() => probeWebAuthnEnvironment().then(setEnvReport)}
+                  />
                 </div>
               )}
 
